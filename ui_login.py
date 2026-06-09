@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import sqlite3
+import threading
 import tkinter as tk
 from tkinter import ttk
 
 import auth
-from config import APP_TITLE, SCHOOL_NAME, SPLASH_BG, SPLASH_FG
+from config import APP_TITLE, DB_PATH, SCHOOL_NAME, SPLASH_BG, SPLASH_FG
+from utils import format_currency
 
 ERROR_FG = "#ff6b6b"
 ENTRY_WIDTH = 30
@@ -34,7 +37,7 @@ class LoginWindow(tk.Toplevel):
         self.resizable(False, False)
         self._center_window()
         self._build_widgets()
-        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.username_entry.focus_set()
 
     def _center_window(self) -> None:
@@ -92,10 +95,61 @@ class LoginWindow(tk.Toplevel):
         auth.touch_session()
         success, message = auth.login(self.username_var.get(), self.password_var.get())
         if success:
+            is_accountant = auth.CURRENT_SESSION is not None and auth.CURRENT_SESSION.role == "ACCOUNTANT"
             self.destroy()
-            self._open_dashboard()
+            dashboard = self._open_dashboard()
+            if is_accountant:
+                self._load_accountant_dues_async(dashboard)
             return
         self._show_login_error(message)
+
+    def _on_close(self) -> None:
+        """Run the application-level close reminder."""
+        from main import on_closing
+
+        on_closing(self)
+
+    def _load_accountant_dues_async(self, dashboard) -> None:
+        """Load today's dues off the UI thread after accountant login."""
+        def worker() -> None:
+            try:
+                from notifications import get_todays_dues
+
+                with sqlite3.connect(DB_PATH) as conn:
+                    conn.execute("PRAGMA foreign_keys=ON")
+                    conn.execute("PRAGMA journal_mode=WAL")
+                    dues = get_todays_dues(conn)
+            except sqlite3.Error:
+                return
+            if dues:
+                try:
+                    dashboard.after(0, lambda: self._show_accountant_dues(dashboard, dues))
+                except tk.TclError:
+                    return
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_accountant_dues(self, dashboard, dues: list[dict]) -> None:
+        """Show a modal acknowledgement list of today's student dues."""
+        if not dashboard.winfo_exists():
+            return
+        dialog = tk.Toplevel(dashboard)
+        dialog.title("Today's Fee Dues")
+        dialog.geometry("620x430")
+        dialog.transient(dashboard)
+        dialog.grab_set()
+        tk.Label(dialog, text="Fees Due Today", font=("Segoe UI", 16, "bold")).pack(pady=(16, 8))
+        columns = ("student", "class", "fee_head", "amount")
+        tree = ttk.Treeview(dialog, columns=columns, show="headings", height=13)
+        for column, heading, width in (("student", "Student", 190), ("class", "Class", 100), ("fee_head", "Fee Head", 170), ("amount", "Amount", 110)):
+            tree.heading(column, text=heading)
+            tree.column(column, width=width)
+        for due in dues:
+            tree.insert("", "end", values=(due["name"], due["class"], due["fee_head"], format_currency(due["amount"])))
+        tree.pack(fill="both", expand=True, padx=12, pady=8)
+        ttk.Button(dialog, text="Acknowledge", command=dialog.destroy).pack(pady=(0, 14))
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        dialog.wait_window()
 
     def _show_login_error(self, message: str) -> None:
         """Display login failure details, including attempts or lock duration."""

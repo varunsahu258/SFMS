@@ -6,6 +6,7 @@ import sqlite3
 import threading
 import time
 import tkinter as tk
+from tkinter import messagebox
 
 from config import (
     APP_SUBTITLE,
@@ -18,6 +19,7 @@ from config import (
     SPLASH_FG,
 )
 from database import init_db
+from integrity import record_machine_fingerprint, startup_integrity_check
 
 
 def start_timeout_monitor() -> None:
@@ -61,6 +63,7 @@ def show_splash() -> None:
     root.title(APP_TITLE)
     root.configure(background=SPLASH_BG)
     root.overrideredirect(True)
+    root.protocol("WM_DELETE_WINDOW", lambda: on_closing(root))
 
     width = 520
     height = 300
@@ -98,9 +101,84 @@ def show_splash() -> None:
     root.mainloop()
 
 
+def _exit_application(window) -> None:
+    """Log out and destroy the Tk application root."""
+    try:
+        import auth
+
+        auth.logout()
+    except Exception:
+        pass
+    root = tk._default_root
+    try:
+        if window is not None and window.winfo_exists():
+            window.destroy()
+    except tk.TclError:
+        pass
+    try:
+        if root is not None and root.winfo_exists():
+            root.destroy()
+    except tk.TclError:
+        pass
+
+
+def on_closing(window=None) -> None:
+    """Check backup age in a worker before allowing the application to close."""
+    target = window or tk._default_root
+    if target is None or getattr(target, "_sfms_close_pending", False):
+        return
+    target._sfms_close_pending = True
+
+    def worker() -> None:
+        try:
+            from notifications import backup_interval_hours, backup_overdue
+
+            with sqlite3.connect(DB_PATH) as conn:
+                _apply_pragmas(conn)
+                overdue = backup_overdue(conn)
+                interval = backup_interval_hours(conn)
+        except sqlite3.Error:
+            overdue = False
+            interval = 0
+        try:
+            target.after(0, lambda: finish(overdue, interval))
+        except tk.TclError:
+            pass
+
+    def finish(overdue: bool, interval: int) -> None:
+        if not overdue:
+            _exit_application(target)
+            return
+        take_backup = messagebox.askyesno(
+            "Backup Reminder",
+            f"No backup in {interval} hours. Take backup before closing?",
+            parent=target,
+        )
+        if take_backup:
+            from ui_backup import BackupWindow
+
+            backup_window = BackupWindow(target)
+            target.wait_window(backup_window)
+        _exit_application(target)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
 def main() -> None:
-    """Initialize the database and start the desktop application."""
+    """Initialize security controls and start the desktop application."""
     init_db()
+    integrity_conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    _apply_pragmas(integrity_conn)
+    try:
+        record_machine_fingerprint(integrity_conn)
+        threading.Thread(
+            target=startup_integrity_check,
+            args=(integrity_conn,),
+            daemon=True,
+        ).start()
+    except Exception:
+        integrity_conn.close()
+        raise
     show_splash()
 
 
