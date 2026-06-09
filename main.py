@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
+import time
 import tkinter as tk
 
 from config import (
@@ -16,6 +18,19 @@ from config import (
     SPLASH_FG,
 )
 from database import init_db
+
+
+def start_timeout_monitor() -> None:
+    """Start a daemon thread that checks session timeout every 60 seconds."""
+    def monitor() -> None:
+        """Check for session timeout every 60 seconds."""
+        import auth
+
+        while True:
+            time.sleep(60)
+            auth.check_timeout()
+
+    threading.Thread(target=monitor, daemon=True).start()
 
 
 def _apply_pragmas(conn: sqlite3.Connection) -> None:
@@ -37,7 +52,7 @@ def _open_login(root: tk.Tk) -> None:
     root.destroy()
     from ui_login import LoginWindow
 
-    LoginWindow()
+    LoginWindow(on_dashboard_open=start_timeout_monitor)
 
 
 def show_splash() -> None:
