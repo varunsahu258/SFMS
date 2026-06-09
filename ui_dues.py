@@ -98,8 +98,14 @@ class DuesWindow(tk.Toplevel):
         auth.touch_session()
         from report_generator import classwise_dues_report
 
-        result = classwise_dues_report(self.rows)
-        messagebox.showinfo("Dues export", f"Dues report export requested.{f' Output: {result}' if result else ''}")
+        class_name = self.class_var.get().strip()
+        if not class_name:
+            messagebox.showerror("Dues export", "Select a class before exporting the classwise report.")
+            return
+        with connect_db() as conn:
+            academic_year = active_academic_year(conn)
+            result = classwise_dues_report(conn, class_name, academic_year)
+        messagebox.showinfo("Dues export", f"Dues report saved to: {result}")
 
 
 def days_overdue(due_date: str | None) -> int:
