@@ -9,7 +9,7 @@ import auth
 from config import APP_TITLE, SCHOOL_NAME, SPLASH_BG, SPLASH_FG
 from ui_change_password import ChangePasswordWindow
 
-WINDOW_SIZE = "700x460"
+WINDOW_SIZE = "700x720"
 
 
 class DashboardWindow(tk.Toplevel):
@@ -44,12 +44,68 @@ class DashboardWindow(tk.Toplevel):
         tk.Label(self, text=user_label, bg=SPLASH_BG, fg=SPLASH_FG, font=("Segoe UI", 12)).pack(pady=(0, 20))
         button_frame = tk.Frame(self, bg=SPLASH_BG)
         button_frame.pack(pady=12)
+        ttk.Button(button_frame, text="Main Collection", command=self._on_main_collection_click).pack(fill="x", pady=5)
+        ttk.Button(button_frame, text="Small Collection", command=self._on_small_collection_click).pack(fill="x", pady=5)
+        ttk.Button(button_frame, text="Exemption Collection", command=self._on_exemption_collection_click).pack(fill="x", pady=5)
+        ttk.Button(button_frame, text="Advance Payment", command=self._on_advance_payment_click).pack(fill="x", pady=5)
+        ttk.Button(button_frame, text="Dues", command=self._on_dues_click).pack(fill="x", pady=5)
+        ttk.Button(button_frame, text="Discounts", command=self._on_discount_click).pack(fill="x", pady=5)
+        ttk.Button(button_frame, text="Exemptions", command=self._on_exemption_click).pack(fill="x", pady=5)
         ttk.Button(button_frame, text="Students", command=self._on_students_click).pack(fill="x", pady=5)
         ttk.Button(button_frame, text="Fee Heads", command=self._on_fee_heads_click).pack(fill="x", pady=5)
         ttk.Button(button_frame, text="Fee Structure", command=self._on_fee_structure_click).pack(fill="x", pady=5)
         ttk.Button(button_frame, text="Academic Years", command=self._on_academic_years_click).pack(fill="x", pady=5)
         ttk.Button(button_frame, text="Change Password", command=self._on_change_password_click).pack(fill="x", pady=5)
         ttk.Button(button_frame, text="Logout", command=self._on_logout_click).pack(fill="x", pady=5)
+
+    def _on_main_collection_click(self) -> None:
+        """Touch the session and open main fee collection."""
+        auth.touch_session()
+        from ui_collection_main import CollectionMainWindow
+
+        CollectionMainWindow(self)
+
+    def _on_small_collection_click(self) -> None:
+        """Touch the session and open small fee collection."""
+        auth.touch_session()
+        from ui_collection_small import CollectionSmallWindow
+
+        CollectionSmallWindow(self)
+
+    def _on_exemption_collection_click(self) -> None:
+        """Touch the session and open exemption-aware collection."""
+        auth.touch_session()
+        from ui_collection_exemption import CollectionExemptionWindow
+
+        CollectionExemptionWindow(self)
+
+    def _on_advance_payment_click(self) -> None:
+        """Touch the session and open advance payment collection."""
+        auth.touch_session()
+        from ui_advance_payment import AdvancePaymentWindow
+
+        AdvancePaymentWindow(self)
+
+    def _on_dues_click(self) -> None:
+        """Touch the session and open dues view."""
+        auth.touch_session()
+        from ui_dues import DuesWindow
+
+        DuesWindow(self)
+
+    def _on_discount_click(self) -> None:
+        """Touch the session and open discount recording."""
+        auth.touch_session()
+        from ui_discount import DiscountWindow
+
+        DiscountWindow(self)
+
+    def _on_exemption_click(self) -> None:
+        """Touch the session and open exemption recording."""
+        auth.touch_session()
+        from ui_exemption_record import ExemptionWindow
+
+        ExemptionWindow(self)
 
     def _on_students_click(self) -> None:
         """Touch the session and open student management."""

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from tkinter import messagebox
 
@@ -37,4 +38,6 @@ def ensure_admin_write() -> bool:
 
 def audit(conn: sqlite3.Connection, action: str, table: str, record_id, old=None, new=None) -> None:
     """Write an audit row for the current session user."""
-    log_action(conn, current_user_id(), action, table, record_id, old, new)
+    old_value = json.dumps(old, default=str) if old is not None else None
+    new_value = json.dumps(new, default=str) if new is not None else None
+    log_action(conn, current_user_id(), action, table, record_id, old_value, new_value)
