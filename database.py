@@ -1,0 +1,347 @@
+"""Database schema creation and first-run seeding for SFMS."""
+
+from __future__ import annotations
+
+import sqlite3
+from datetime import datetime
+
+import bcrypt
+
+from config import (
+    ACADEMIC_YEAR_START_MONTH,
+    ACTION_DISCOUNT_CREATED,
+    ACTION_EXEMPTION_CREATED,
+    BACKUP_INTERVAL_DEFAULT,
+    CHEQUE_STATUS_PENDING,
+    DB_PATH,
+    DEFAULT_ADMIN_ACTIVE,
+    DEFAULT_ADMIN_PASSWORD,
+    DEFAULT_ADMIN_ROLE,
+    DEFAULT_ADMIN_USERNAME,
+    LOGO_PATH,
+    REGISTER_BIG,
+    REGISTER_BOTH,
+    REGISTER_SMALL,
+    ROLE_ACCOUNTANT,
+    ROLE_ADMIN,
+    SCHOOL_ADDRESS,
+    SCHOOL_NAME,
+    SESSION_TIMEOUT_DEFAULT,
+    SETTING_BACKUP_INTERVAL_HOURS,
+    SETTING_LOGO_PATH,
+    SETTING_SCHOOL_ADDRESS,
+    SETTING_SCHOOL_NAME,
+    SETTING_SESSION_TIMEOUT_MINUTES,
+    STATUS_ACTIVE,
+    TRG_AUDIT_DELETE_MSG,
+    TRG_AUDIT_UPDATE_MSG,
+    TRG_HASH_DELETE_MSG,
+    TRG_HASH_UPDATE_MSG,
+    TRG_PAYMENTS_DELETE_MSG,
+    TRG_PAYMENTS_UPDATE_MSG,
+    TRG_RECEIPTS_DELETE_MSG,
+)
+from utils import now_str
+
+
+def _apply_pragmas(conn: sqlite3.Connection) -> None:
+    """Apply required SQLite pragmas for every database connection."""
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA journal_mode=WAL")
+
+
+def _create_tables(conn: sqlite3.Connection) -> None:
+    """Create all required SFMS tables if they do not already exist."""
+    conn.executescript(
+        f"""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY,
+            username TEXT UNIQUE,
+            password_hash TEXT,
+            role TEXT CHECK(role IN ('{ROLE_ADMIN}','{ROLE_ACCOUNTANT}')),
+            is_active INTEGER DEFAULT 1,
+            failed_attempts INTEGER DEFAULT 0,
+            locked_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS students (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            class TEXT,
+            section TEXT,
+            aadhaar TEXT UNIQUE,
+            phone TEXT,
+            guardian_name TEXT,
+            is_active INTEGER DEFAULT 1,
+            status TEXT DEFAULT '{STATUS_ACTIVE}',
+            created_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS fee_heads (
+            id INTEGER PRIMARY KEY,
+            name TEXT,
+            register_type TEXT CHECK(register_type IN ('{REGISTER_BIG}','{REGISTER_SMALL}','{REGISTER_BOTH}')),
+            is_active INT DEFAULT 1
+        );
+
+        CREATE TABLE IF NOT EXISTS fee_structure (
+            id INTEGER PRIMARY KEY,
+            academic_year TEXT,
+            class TEXT,
+            fee_head_id INTEGER,
+            amount REAL,
+            due_date TEXT,
+            FOREIGN KEY (fee_head_id) REFERENCES fee_heads(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS payments (
+            id INTEGER PRIMARY KEY,
+            student_id INTEGER,
+            receipt_no TEXT,
+            fee_head_id INTEGER,
+            amount_due REAL,
+            amount_paid REAL,
+            balance REAL,
+            payment_date TEXT,
+            collected_by INTEGER,
+            payment_mode TEXT,
+            note TEXT,
+            hash TEXT,
+            FOREIGN KEY (student_id) REFERENCES students(id),
+            FOREIGN KEY (fee_head_id) REFERENCES fee_heads(id),
+            FOREIGN KEY (collected_by) REFERENCES users(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS receipts (
+            id INTEGER PRIMARY KEY,
+            receipt_no TEXT UNIQUE,
+            student_id INTEGER,
+            total_paid REAL,
+            receipt_type TEXT,
+            printed_at TEXT,
+            printed_by INTEGER,
+            reprint_count INTEGER DEFAULT 0,
+            last_reprint_at TEXT,
+            last_reprint_by INTEGER,
+            FOREIGN KEY (student_id) REFERENCES students(id),
+            FOREIGN KEY (printed_by) REFERENCES users(id),
+            FOREIGN KEY (last_reprint_by) REFERENCES users(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS discounts (
+            id INTEGER PRIMARY KEY,
+            student_id INTEGER,
+            fee_head_id INTEGER,
+            amount REAL,
+            reason TEXT,
+            approved_by INTEGER,
+            created_at TEXT,
+            FOREIGN KEY (student_id) REFERENCES students(id),
+            FOREIGN KEY (fee_head_id) REFERENCES fee_heads(id),
+            FOREIGN KEY (approved_by) REFERENCES users(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS exemptions (
+            id INTEGER PRIMARY KEY,
+            student_id INTEGER,
+            academic_year TEXT,
+            fee_head_ids TEXT,
+            reason TEXT,
+            approved_by INTEGER,
+            created_at TEXT,
+            FOREIGN KEY (student_id) REFERENCES students(id),
+            FOREIGN KEY (approved_by) REFERENCES users(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS cheque_tracker (
+            id INTEGER PRIMARY KEY,
+            payment_id INTEGER,
+            cheque_no TEXT,
+            bank TEXT,
+            amount REAL,
+            collected_on TEXT,
+            status TEXT DEFAULT '{CHEQUE_STATUS_PENDING}',
+            updated_at TEXT,
+            FOREIGN KEY (payment_id) REFERENCES payments(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS academic_years (
+            id INTEGER PRIMARY KEY,
+            label TEXT UNIQUE,
+            start_date TEXT,
+            end_date TEXT,
+            is_active INTEGER DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY,
+            timestamp TEXT,
+            user_id INTEGER,
+            action TEXT,
+            table_name TEXT,
+            record_id TEXT,
+            old_value TEXT,
+            new_value TEXT,
+            tamper_attempt INTEGER DEFAULT 0,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS receipt_hashes (
+            receipt_no TEXT PRIMARY KEY,
+            sha256_hash TEXT,
+            created_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS backups_log (
+            id INTEGER PRIMARY KEY,
+            filename TEXT,
+            created_at TEXT,
+            created_by TEXT,
+            type TEXT
+        );
+        """
+    )
+
+
+def _create_triggers(conn: sqlite3.Connection) -> None:
+    """Create all required immutability and audit triggers."""
+    conn.executescript(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS trg_payments_no_delete
+        BEFORE DELETE ON payments
+        BEGIN
+            SELECT RAISE(ABORT, '{TRG_PAYMENTS_DELETE_MSG}');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_payments_no_update
+        BEFORE UPDATE ON payments
+        BEGIN
+            SELECT RAISE(ABORT, '{TRG_PAYMENTS_UPDATE_MSG}');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_audit_no_delete
+        BEFORE DELETE ON audit_log
+        BEGIN
+            SELECT RAISE(ABORT, '{TRG_AUDIT_DELETE_MSG}');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_audit_no_update
+        BEFORE UPDATE ON audit_log
+        BEGIN
+            SELECT RAISE(ABORT, '{TRG_AUDIT_UPDATE_MSG}');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_receipts_no_delete
+        BEFORE DELETE ON receipts
+        BEGIN
+            SELECT RAISE(ABORT, '{TRG_RECEIPTS_DELETE_MSG}');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_hash_no_delete
+        BEFORE DELETE ON receipt_hashes
+        BEGIN
+            SELECT RAISE(ABORT, '{TRG_HASH_DELETE_MSG}');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_hash_no_update
+        BEFORE UPDATE ON receipt_hashes
+        BEGIN
+            SELECT RAISE(ABORT, '{TRG_HASH_UPDATE_MSG}');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_discount_audit
+        AFTER INSERT ON discounts
+        BEGIN
+            INSERT INTO audit_log (
+                timestamp, user_id, action, table_name, record_id,
+                old_value, new_value, tamper_attempt
+            ) VALUES (
+                strftime('%d-%m-%Y %H:%M:%S', 'now', 'localtime'),
+                NEW.approved_by,
+                '{ACTION_DISCOUNT_CREATED}',
+                'discounts',
+                NEW.id,
+                NULL,
+                'student_id=' || NEW.student_id || ';fee_head_id=' || NEW.fee_head_id || ';amount=' || NEW.amount,
+                0
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_exemption_audit
+        AFTER INSERT ON exemptions
+        BEGIN
+            INSERT INTO audit_log (
+                timestamp, user_id, action, table_name, record_id,
+                old_value, new_value, tamper_attempt
+            ) VALUES (
+                strftime('%d-%m-%Y %H:%M:%S', 'now', 'localtime'),
+                NEW.approved_by,
+                '{ACTION_EXEMPTION_CREATED}',
+                'exemptions',
+                NEW.id,
+                NULL,
+                'student_id=' || NEW.student_id || ';academic_year=' || NEW.academic_year || ';fee_head_ids=' || NEW.fee_head_ids,
+                0
+            );
+        END;
+        """
+    )
+
+
+def _academic_year_values() -> tuple[str, str, str]:
+    """Return the current academic-year label, start date, and end date."""
+    today = datetime.now()
+    start_year = today.year if today.month >= ACADEMIC_YEAR_START_MONTH else today.year - 1
+    end_year = start_year + 1
+    label = f"{start_year}-{str(end_year)[-2:]}"
+    start_date = f"01-04-{start_year}"
+    end_date = f"31-03-{end_year}"
+    return label, start_date, end_date
+
+
+def _seed_first_run(conn: sqlite3.Connection) -> None:
+    """Insert default admin, settings, and active academic year when users table is empty."""
+    user_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    if user_count:
+        return
+
+    password_hash = bcrypt.hashpw(DEFAULT_ADMIN_PASSWORD.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    conn.execute(
+        """
+        INSERT INTO users (username, password_hash, role, is_active)
+        VALUES (?, ?, ?, ?)
+        """,
+        (DEFAULT_ADMIN_USERNAME, password_hash, DEFAULT_ADMIN_ROLE, DEFAULT_ADMIN_ACTIVE),
+    )
+
+    settings = (
+        (SETTING_SCHOOL_NAME, SCHOOL_NAME),
+        (SETTING_SCHOOL_ADDRESS, SCHOOL_ADDRESS),
+        (SETTING_LOGO_PATH, LOGO_PATH),
+        (SETTING_SESSION_TIMEOUT_MINUTES, str(SESSION_TIMEOUT_DEFAULT)),
+        (SETTING_BACKUP_INTERVAL_HOURS, str(BACKUP_INTERVAL_DEFAULT)),
+    )
+    conn.executemany("INSERT INTO settings (key, value) VALUES (?, ?)", settings)
+
+    label, start_date, end_date = _academic_year_values()
+    conn.execute(
+        """
+        INSERT INTO academic_years (label, start_date, end_date, is_active)
+        VALUES (?, ?, ?, 1)
+        """,
+        (label, start_date, end_date),
+    )
+
+
+def init_db() -> None:
+    """Initialize the SQLite database, triggers, and first-run records."""
+    with sqlite3.connect(DB_PATH) as conn:
+        _apply_pragmas(conn)
+        _create_tables(conn)
+        _create_triggers(conn)
+        _seed_first_run(conn)
