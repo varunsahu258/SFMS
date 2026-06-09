@@ -18,6 +18,7 @@ from config import (
     SPLASH_FG,
 )
 from database import init_db
+from integrity import record_machine_fingerprint, startup_integrity_check
 
 
 def start_timeout_monitor() -> None:
@@ -99,8 +100,20 @@ def show_splash() -> None:
 
 
 def main() -> None:
-    """Initialize the database and start the desktop application."""
+    """Initialize security controls and start the desktop application."""
     init_db()
+    integrity_conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    _apply_pragmas(integrity_conn)
+    try:
+        record_machine_fingerprint(integrity_conn)
+        threading.Thread(
+            target=startup_integrity_check,
+            args=(integrity_conn,),
+            daemon=True,
+        ).start()
+    except Exception:
+        integrity_conn.close()
+        raise
     show_splash()
 
 

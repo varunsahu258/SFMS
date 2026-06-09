@@ -9,7 +9,7 @@ import auth
 from config import APP_TITLE, SCHOOL_NAME, SPLASH_BG, SPLASH_FG
 from ui_change_password import ChangePasswordWindow
 
-WINDOW_SIZE = "700x720"
+WINDOW_SIZE = "700x900"
 
 
 class DashboardWindow(tk.Toplevel):
@@ -55,6 +55,11 @@ class DashboardWindow(tk.Toplevel):
         ttk.Button(button_frame, text="Fee Heads", command=self._on_fee_heads_click).pack(fill="x", pady=5)
         ttk.Button(button_frame, text="Fee Structure", command=self._on_fee_structure_click).pack(fill="x", pady=5)
         ttk.Button(button_frame, text="Academic Years", command=self._on_academic_years_click).pack(fill="x", pady=5)
+        ttk.Button(button_frame, text="Reports", command=self._on_reports_click).pack(fill="x", pady=5)
+        if auth.CURRENT_SESSION is not None and auth.CURRENT_SESSION.role == "ADMIN":
+            ttk.Button(button_frame, text="Receipt Reprint", command=self._on_receipt_reprint_click).pack(fill="x", pady=5)
+            ttk.Button(button_frame, text="Void Payment", command=self._on_void_payment_click).pack(fill="x", pady=5)
+            ttk.Button(button_frame, text="Audit Log", command=self._on_audit_log_click).pack(fill="x", pady=5)
         ttk.Button(button_frame, text="Change Password", command=self._on_change_password_click).pack(fill="x", pady=5)
         ttk.Button(button_frame, text="Logout", command=self._on_logout_click).pack(fill="x", pady=5)
 
@@ -134,6 +139,34 @@ class DashboardWindow(tk.Toplevel):
         from ui_academic_year import AcademicYearWindow
 
         AcademicYearWindow(self)
+
+    def _on_reports_click(self) -> None:
+        """Touch the session and open the PDF report center."""
+        auth.touch_session()
+        from ui_reports import ReportsWindow
+
+        ReportsWindow(self)
+
+    def _on_receipt_reprint_click(self) -> None:
+        """Touch the session and open administrator receipt reprinting."""
+        auth.touch_session()
+        from ui_receipt_reprint import ReprintWindow
+
+        ReprintWindow(self)
+
+    def _on_void_payment_click(self) -> None:
+        """Touch the session and open administrator payment voiding."""
+        auth.touch_session()
+        from ui_void_payment import VoidPaymentWindow
+
+        VoidPaymentWindow(self)
+
+    def _on_audit_log_click(self) -> None:
+        """Touch the session and open the administrator audit viewer."""
+        auth.touch_session()
+        from ui_audit import AuditLogWindow
+
+        AuditLogWindow(self)
 
     def _on_change_password_click(self) -> None:
         """Touch the session and open the change-password window."""
