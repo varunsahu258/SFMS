@@ -15,9 +15,10 @@ from utils import format_currency, today_str
 class DuesWindow(tk.Toplevel):
     """Display student-wise or class-wide unpaid dues."""
 
-    def __init__(self, master=None):
-        """Create the dues window."""
+    def __init__(self, master=None, overdue_threshold: int | None = None):
+        """Create the dues window with an optional overdue-days filter."""
         super().__init__(master)
+        self.overdue_threshold = overdue_threshold
         self.title("Dues")
         self.geometry("980x560")
         self.configure(bg=SPLASH_BG)
@@ -26,6 +27,9 @@ class DuesWindow(tk.Toplevel):
         self.rows = []
         self._build_widgets()
         self._load_classes()
+        if self.overdue_threshold is not None:
+            self.title(f"Dues — {self.overdue_threshold}+ Days Overdue")
+            self.after(0, self.load_dues)
 
     def _build_widgets(self) -> None:
         """Build filters, dues table, and export action."""
@@ -72,7 +76,8 @@ class DuesWindow(tk.Toplevel):
                 f"""
                 SELECT s.name AS student, fh.name AS fee_head, fs.amount AS amount_due, fs.due_date,
                        COALESCE(SUM(p.amount_paid), 0) AS paid,
-                       fs.amount - COALESCE(SUM(p.amount_paid), 0) AS balance
+                       fs.amount - COALESCE(SUM(p.amount_paid), 0) AS balance,
+                       MIN(p.payment_date) AS oldest_payment_date
                 FROM students s
                 JOIN fee_structure fs ON fs.class = s.class AND fs.academic_year = ?
                 JOIN fee_heads fh ON fh.id = fs.fee_head_id
@@ -84,8 +89,10 @@ class DuesWindow(tk.Toplevel):
                 """,
                 params,
             ).fetchall()
+        if self.overdue_threshold is not None:
+            rows = [row for row in rows if days_overdue(row["oldest_payment_date"] or row["due_date"]) >= self.overdue_threshold]
         for row in rows:
-            days = days_overdue(row["due_date"])
+            days = days_overdue(row["oldest_payment_date"] or row["due_date"])
             values = (
                 row["student"], row["fee_head"], format_currency(row["amount_due"] or 0),
                 format_currency(row["paid"] or 0), format_currency(row["balance"] or 0), row["due_date"] or "", days,

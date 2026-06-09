@@ -14,10 +14,10 @@ from reportlab.lib.enums import TA_CENTER, TA_RIGHT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
-from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import Image, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from config import REPORTS_DIR, SCHOOL_NAME
-from utils import format_currency
+from utils import format_currency, today_str
 
 MARGIN = 20 * mm
 FONT = "Helvetica"
@@ -459,4 +459,76 @@ def audit_export(conn, filters=None) -> str:
     _header(story, conn, "Audit Log Export")
     story.append(_table(data, [9 * mm, 25 * mm, 18 * mm, 25 * mm, 21 * mm, 16 * mm, 44 * mm, 12 * mm], 5.8))
     _document(path, "Audit Log Export").build(story)
+    return path
+
+
+def fee_notice_pdf(conn, class_name) -> str:
+    """Generate one black-and-white A4 fee notice per student with dues."""
+    rows = _row_dicts(conn.execute(
+        """
+        SELECT s.id AS student_id, s.name AS student, s.class,
+               fh.name AS fee_head, fs.amount AS amount_due, fs.due_date,
+               COALESCE(SUM(p.amount_paid), 0) AS paid,
+               fs.amount - COALESCE(SUM(p.amount_paid), 0) AS balance
+        FROM students s
+        JOIN fee_structure fs ON fs.class = s.class
+        JOIN fee_heads fh ON fh.id = fs.fee_head_id
+        LEFT JOIN payments p ON p.student_id = s.id AND p.fee_head_id = fs.fee_head_id
+        WHERE s.class = ? AND s.is_active = 1
+        GROUP BY s.id, fs.id
+        HAVING balance > 0
+        ORDER BY s.name, fh.name
+        """,
+        (class_name,),
+    ))
+    students: dict[int, dict] = {}
+    for row in rows:
+        student = students.setdefault(
+            row["student_id"],
+            {"name": row["student"], "class": row["class"], "items": []},
+        )
+        student["items"].append(row)
+    if not students:
+        raise ValueError(f"No outstanding dues found for {class_name}.")
+
+    path = _output_path(
+        f"fee_notices_{_safe_name(class_name)}_{datetime.now().strftime('%d%m%Y')}.pdf"
+    )
+    styles = _styles()
+    story: list = []
+    for index, student in enumerate(students.values()):
+        if index:
+            story.append(PageBreak())
+        _header(story, conn, "FEE DUE NOTICE")
+        story.extend([
+            Paragraph(f"Student: <b>{student['name']}</b>", styles["body"]),
+            Paragraph(f"Class: <b>{student['class']}</b>", styles["body"]),
+            Spacer(1, 6 * mm),
+            Paragraph("The following school fees remain outstanding:", styles["body"]),
+            Spacer(1, 3 * mm),
+        ])
+        data = [["Fee Head", "Amount Due", "Paid", "Balance", "Due Date"]]
+        total = 0.0
+        due_dates: list[date] = []
+        for item in student["items"]:
+            balance = float(item["balance"] or 0)
+            total += balance
+            parsed_due = _parse_date(item.get("due_date"))
+            if parsed_due:
+                due_dates.append(parsed_due)
+            data.append([
+                item["fee_head"], format_currency(item["amount_due"] or 0),
+                format_currency(item["paid"] or 0), format_currency(balance),
+                item.get("due_date") or "",
+            ])
+        data.append(["TOTAL", "", "", format_currency(total), ""])
+        story.append(_table(data, [55 * mm, 32 * mm, 28 * mm, 32 * mm, 23 * mm], 7.5, right_columns=(1, 2, 3)))
+        deadline = min(due_dates).strftime("%d-%m-%Y") if due_dates else today_str()
+        story.extend([
+            Spacer(1, 12 * mm),
+            Paragraph(f"Please clear the above dues by {deadline}.", styles["body"]),
+            Spacer(1, 20 * mm),
+            Paragraph("Authorized Signatory", styles["right"]),
+        ])
+    _document(path, f"Fee Notices {class_name}").build(story)
     return path
