@@ -14,16 +14,21 @@ from config import (
     DB_PATH,
     SCHOOL_NAME,
     SETTING_SCHOOL_NAME,
-    SPLASH_BG,
     SPLASH_DURATION_MS,
-    SPLASH_FG,
 )
 from database import init_db
 from integrity import record_machine_fingerprint, startup_integrity_check
 
+_MONITORS_STARTED = False
+
 
 def start_timeout_monitor() -> None:
-    """Start a daemon thread that checks session timeout every 60 seconds."""
+    """Start the single timeout monitor and hourly automatic-backup worker."""
+    global _MONITORS_STARTED
+    if _MONITORS_STARTED:
+        return
+    _MONITORS_STARTED = True
+
     def monitor() -> None:
         """Check for session timeout every 60 seconds."""
         import auth
@@ -32,7 +37,21 @@ def start_timeout_monitor() -> None:
             time.sleep(60)
             auth.check_timeout()
 
+    def auto_backup_loop() -> None:
+        """Check once per hour and create an automatic backup when overdue."""
+        from backup import auto_backup
+
+        while True:
+            time.sleep(3600)
+            try:
+                with sqlite3.connect(DB_PATH) as conn:
+                    _apply_pragmas(conn)
+                    auto_backup(conn)
+            except Exception:
+                continue
+
     threading.Thread(target=monitor, daemon=True).start()
+    threading.Thread(target=auto_backup_loop, daemon=True).start()
 
 
 def _apply_pragmas(conn: sqlite3.Connection) -> None:
@@ -60,8 +79,11 @@ def _open_login(root: tk.Tk) -> None:
 def show_splash() -> None:
     """Show the two-second SFMS splash screen before login."""
     root = tk.Tk()
+    from ui_theme import apply_theme
+
+    apply_theme(root)
     root.title(APP_TITLE)
-    root.configure(background=SPLASH_BG)
+    root.configure(background=root._sfms_palette["bg"])
     root.overrideredirect(True)
     root.protocol("WM_DELETE_WINDOW", lambda: on_closing(root))
 
@@ -71,30 +93,30 @@ def show_splash() -> None:
     y_position = (root.winfo_screenheight() - height) // 2
     root.geometry(f"{width}x{height}+{x_position}+{y_position}")
 
-    frame = tk.Frame(root, background=SPLASH_BG)
+    frame = tk.Frame(root, background=root._sfms_palette["bg"])
     frame.pack(expand=True, fill="both")
 
     tk.Label(
         frame,
         text=_school_name(),
         font=("Segoe UI", 18, "bold"),
-        bg=SPLASH_BG,
-        fg=SPLASH_FG,
+        bg=root._sfms_palette["bg"],
+        fg=root._sfms_palette["fg"],
         wraplength=460,
     ).pack(pady=(72, 12))
     tk.Label(
         frame,
         text=APP_TITLE,
         font=("Segoe UI", 44, "bold"),
-        bg=SPLASH_BG,
-        fg=SPLASH_FG,
+        bg=root._sfms_palette["bg"],
+        fg=root._sfms_palette["fg"],
     ).pack()
     tk.Label(
         frame,
         text=APP_SUBTITLE,
         font=("Segoe UI", 13),
-        bg=SPLASH_BG,
-        fg=SPLASH_FG,
+        bg=root._sfms_palette["bg"],
+        fg=root._sfms_palette["fg"],
     ).pack(pady=(8, 0))
 
     root.after(SPLASH_DURATION_MS, lambda: _open_login(root))

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import json
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Iterable
@@ -15,8 +16,11 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.platypus import Image, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.pdfgen import canvas
 
 from config import REPORTS_DIR, SCHOOL_NAME
+from excel_exporter import export_to_excel
+from audit import log_action
 from utils import format_currency, today_str
 
 MARGIN = 20 * mm
@@ -76,6 +80,7 @@ def _header(story: list, conn, title: str) -> None:
     title_block = [
         Paragraph(settings.get("school_name") or SCHOOL_NAME, styles["title"]),
         Paragraph(title, styles["subtitle"]),
+        Paragraph(f"Generated at: {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}", styles["small"]),
     ]
     if logo_path and Path(logo_path).is_file():
         logo = Image(logo_path, width=18 * mm, height=18 * mm, kind="proportional")
@@ -159,6 +164,40 @@ def _in_bounds(value: str | None, bounds: tuple[date | None, date | None]) -> bo
 def _safe_name(value: object) -> str:
     """Return a filesystem-safe identifier."""
     return "".join(character for character in str(value) if character.isalnum() or character in ("-", "_")) or "report"
+
+
+def _generated_by() -> str:
+    """Return the current session username for report metadata."""
+    try:
+        import auth
+
+        return auth.CURRENT_SESSION.username if auth.CURRENT_SESSION is not None else "SYSTEM"
+    except (AttributeError, ImportError):
+        return "SYSTEM"
+
+
+def _excel_metadata(filters: str) -> dict:
+    """Return standard metadata for companion Excel workbooks."""
+    return {
+        "generated_by": _generated_by(),
+        "generated_at": datetime.now().strftime("%d-%m-%Y %H:%M:%S"),
+        "filters": filters,
+    }
+
+
+def _sql_date(column: str) -> str:
+    """Convert DD-MM-YYYY text to a SQLite date expression."""
+    return f"date(substr({column}, 7, 4) || '-' || substr({column}, 4, 2) || '-' || substr({column}, 1, 2))"
+
+
+def _month_bounds(year: int, month: int) -> tuple[date, date]:
+    """Return the first and last calendar date for a month."""
+    start = date(int(year), int(month), 1)
+    if start.month == 12:
+        end = date(start.year + 1, 1, 1) - timedelta(days=1)
+    else:
+        end = date(start.year, start.month + 1, 1) - timedelta(days=1)
+    return start, end
 
 
 def daily_report(conn, date_str) -> str:
@@ -254,7 +293,7 @@ def monthly_report(conn, year, month) -> str:
     return path
 
 
-def classwise_dues_report(conn, class_name, academic_year) -> str:
+def classwise_dues_report(conn, class_name, academic_year, student_id=None) -> str:
     """Generate outstanding fee-head balances for every student in a class."""
     rows = _row_dicts(conn.execute(
         """
@@ -267,11 +306,12 @@ def classwise_dues_report(conn, class_name, academic_year) -> str:
         JOIN fee_heads fh ON fh.id = fs.fee_head_id
         LEFT JOIN payments p ON p.student_id = s.id AND p.fee_head_id = fs.fee_head_id
         WHERE s.class = ? AND s.is_active = 1
+          AND (? IS NULL OR s.id = ?)
         GROUP BY s.id, fs.id
         HAVING balance > 0
         ORDER BY s.name, fh.name
         """,
-        (academic_year, class_name),
+        (academic_year, class_name, student_id, student_id),
     ))
     today = date.today()
     data = [["Student", "Fee Head", "Amount Due", "Paid", "Balance", "Days Overdue"]]
@@ -281,9 +321,11 @@ def classwise_dues_report(conn, class_name, academic_year) -> str:
         data.append([row["student"], row["fee_head"], format_currency(row["amount_due"] or 0), format_currency(row["paid"] or 0), format_currency(row["balance"] or 0), days])
     if len(data) == 1:
         data.append(["No outstanding dues", "", format_currency(0), format_currency(0), format_currency(0), 0])
-    path = _output_path(f"class_dues_{_safe_name(class_name)}_{_safe_name(academic_year)}.pdf")
+    suffix = f"_student_{student_id}" if student_id is not None else ""
+    path = _output_path(f"class_dues_{_safe_name(class_name)}_{_safe_name(academic_year)}{suffix}.pdf")
     story: list = []
-    _header(story, conn, f"Classwise Dues Report — {class_name} ({academic_year})")
+    report_title = f"Student Dues Statement — {rows[0]['student']}" if student_id is not None and rows else f"Classwise Dues Report — {class_name} ({academic_year})"
+    _header(story, conn, report_title)
     story.append(_table(data, [36 * mm, 36 * mm, 27 * mm, 24 * mm, 27 * mm, 20 * mm], 6.8, right_columns=(2, 3, 4, 5)))
     _document(path, f"Classwise Dues {class_name}").build(story)
     return path
@@ -531,4 +573,399 @@ def fee_notice_pdf(conn, class_name) -> str:
             Paragraph("Authorized Signatory", styles["right"]),
         ])
     _document(path, f"Fee Notices {class_name}").build(story)
+    return path
+
+
+def feehead_collection_report(conn, academic_year, month=None) -> str:
+    """Generate fee-head collection totals for an academic year or one month."""
+    bounds = _academic_bounds(conn, academic_year)
+    month_value = int(month) if month not in (None, "") else None
+    rows = _row_dicts(conn.execute(
+        """
+        SELECT fh.id AS fee_head_id, fh.name AS fee_head,
+               p.amount_paid, p.payment_date
+        FROM payments p
+        JOIN fee_heads fh ON fh.id = p.fee_head_id
+        ORDER BY fh.name, p.payment_date
+        """
+    ))
+    totals: defaultdict[str, float] = defaultdict(float)
+    for row in rows:
+        payment_date = _parse_date(row.get("payment_date"))
+        if not payment_date or not _in_bounds(row.get("payment_date"), bounds):
+            continue
+        if month_value is not None and payment_date.month != month_value:
+            continue
+        totals[row["fee_head"] or "Fee"] += float(row.get("amount_paid") or 0)
+
+    period = datetime(2000, month_value, 1).strftime("%B") if month_value else "Full Academic Year"
+    title = f"Fee Head Collection Report — {academic_year} — {period}"
+    excel_rows = [{"Fee Head": name, "Amount Collected": amount} for name, amount in sorted(totals.items())]
+    grand_total = sum(totals.values())
+    excel_rows.append({"Fee Head": "TOTAL", "Amount Collected": grand_total})
+
+    suffix = f"_{month_value:02d}" if month_value else ""
+    stem = f"feehead_collection_{_safe_name(academic_year)}{suffix}"
+    pdf_path = _output_path(f"{stem}.pdf")
+    story: list = []
+    _header(story, conn, title)
+    table_data = [["Fee Head", "Amount Collected"]] + [
+        [row["Fee Head"], format_currency(row["Amount Collected"])] for row in excel_rows
+    ]
+    story.append(_table(table_data, [100 * mm, 70 * mm], right_columns=(1,)))
+    _document(pdf_path, title).build(story)
+    export_to_excel(
+        excel_rows,
+        ["Fee Head", "Amount Collected"],
+        title,
+        stem,
+        _excel_metadata(f"academic_year={academic_year}; month={month_value or 'all'}"),
+    )
+    return pdf_path
+
+
+def comparative_report(conn, year, month) -> str:
+    """Compare current, previous, and prior-year monthly totals per fee head."""
+    year = int(year)
+    month = int(month)
+    current_start, _current_end = _month_bounds(year, month)
+    if month == 1:
+        previous_year, previous_month = year - 1, 12
+    else:
+        previous_year, previous_month = year, month - 1
+    same_last_year = year - 1
+    rows = _row_dicts(conn.execute(
+        """
+        SELECT fh.name AS fee_head, p.amount_paid, p.payment_date
+        FROM payments p JOIN fee_heads fh ON fh.id = p.fee_head_id
+        ORDER BY fh.name
+        """
+    ))
+    grouped: dict[str, list[float]] = {}
+    for row in rows:
+        payment_date = _parse_date(row.get("payment_date"))
+        if not payment_date:
+            continue
+        values = grouped.setdefault(row["fee_head"] or "Fee", [0.0, 0.0, 0.0])
+        amount = float(row.get("amount_paid") or 0)
+        if payment_date.year == year and payment_date.month == month:
+            values[0] += amount
+        if payment_date.year == previous_year and payment_date.month == previous_month:
+            values[1] += amount
+        if payment_date.year == same_last_year and payment_date.month == month:
+            values[2] += amount
+
+    current_label = current_start.strftime("%b %Y")
+    previous_label = datetime(previous_year, previous_month, 1).strftime("%b %Y")
+    last_year_label = datetime(same_last_year, month, 1).strftime("%b %Y")
+    current_header = f"Amount {current_label}"
+    previous_header = f"Amount {previous_label}"
+    last_year_header = f"Amount {last_year_label}"
+    headers = ["Fee Head", current_header, previous_header, last_year_header]
+    excel_rows = [
+        {
+            "Fee Head": fee_head,
+            current_header: values[0],
+            previous_header: values[1],
+            last_year_header: values[2],
+        }
+        for fee_head, values in sorted(grouped.items())
+    ]
+    totals = [sum(values[index] for values in grouped.values()) for index in range(3)]
+    excel_rows.append({"Fee Head": "TOTAL", current_header: totals[0], previous_header: totals[1], last_year_header: totals[2]})
+
+    title = f"Comparative Collection Report — {current_label}"
+    stem = f"comparative_{year}_{month:02d}"
+    pdf_path = _output_path(f"{stem}.pdf")
+    story: list = []
+    _header(story, conn, title)
+    table_data = [headers] + [
+        [row["Fee Head"], format_currency(row[current_header]), format_currency(row[previous_header]), format_currency(row[last_year_header])]
+        for row in excel_rows
+    ]
+    story.append(_table(table_data, [65 * mm, 35 * mm, 35 * mm, 35 * mm], 7.2, right_columns=(1, 2, 3)))
+    _document(pdf_path, title).build(story)
+    export_to_excel(
+        excel_rows,
+        headers,
+        title,
+        stem,
+        _excel_metadata(f"year={year}; month={month}"),
+    )
+    return pdf_path
+
+
+def discount_register_report(conn, academic_year) -> str:
+    """Generate the academic-year discount register and companion workbook."""
+    bounds = _academic_bounds(conn, academic_year)
+    rows = _row_dicts(conn.execute(
+        """
+        SELECT s.name AS student, fh.name AS fee_head, d.amount, d.reason,
+               COALESCE(u.username, '') AS approved_by, d.created_at
+        FROM discounts d
+        JOIN students s ON s.id = d.student_id
+        JOIN fee_heads fh ON fh.id = d.fee_head_id
+        LEFT JOIN users u ON u.id = d.approved_by
+        ORDER BY d.created_at, s.name, fh.name
+        """
+    ))
+    filtered = []
+    for row in rows:
+        created_date = str(row.get("created_at") or "").split(" ")[0]
+        if _in_bounds(created_date, bounds):
+            filtered.append(row)
+    excel_rows = [
+        {
+            "Student": row["student"],
+            "Fee Head": row["fee_head"],
+            "Amount": float(row.get("amount") or 0),
+            "Reason": row.get("reason") or "",
+            "Approved By": row.get("approved_by") or "",
+            "Date": row.get("created_at") or "",
+        }
+        for row in filtered
+    ]
+    total = sum(row["Amount"] for row in excel_rows)
+    excel_rows.append({"Student": "TOTAL", "Fee Head": "", "Amount": total, "Reason": "", "Approved By": "", "Date": ""})
+    headers = ["Student", "Fee Head", "Amount", "Reason", "Approved By", "Date"]
+    title = f"Discount Register — {academic_year}"
+    stem = f"discount_register_{_safe_name(academic_year)}"
+    pdf_path = _output_path(f"{stem}.pdf")
+    story: list = []
+    _header(story, conn, title)
+    table_data = [headers] + [
+        [row["Student"], row["Fee Head"], format_currency(row["Amount"]), row["Reason"], row["Approved By"], row["Date"]]
+        for row in excel_rows
+    ]
+    story.append(_table(table_data, [34 * mm, 31 * mm, 25 * mm, 40 * mm, 22 * mm, 28 * mm], 6.5, right_columns=(2,)))
+    _document(pdf_path, title).build(story)
+    export_to_excel(excel_rows, headers, title, stem, _excel_metadata(f"academic_year={academic_year}"))
+    return pdf_path
+
+
+def void_report(conn) -> str:
+    """Generate a register of immutable void-payment reversal rows."""
+    rows = _row_dicts(conn.execute(
+        """
+        SELECT p.receipt_no AS void_receipt, p.note, s.name AS student,
+               SUM(p.amount_paid) AS amount
+        FROM payments p
+        JOIN students s ON s.id = p.student_id
+        WHERE p.note LIKE 'VOID%'
+        GROUP BY p.receipt_no, p.note, s.id, s.name
+        ORDER BY p.id
+        """
+    ))
+    audit_rows = _row_dicts(conn.execute(
+        """
+        SELECT record_id, new_value
+        FROM audit_log
+        WHERE action = 'PAYMENT_VOID'
+        ORDER BY id
+        """
+    ))
+    reasons: dict[str, str] = {}
+    for audit_row in audit_rows:
+        try:
+            payload = json.loads(audit_row.get("new_value") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            payload = {}
+        reasons[str(audit_row.get("record_id") or payload.get("void_receipt_no") or "")] = str(payload.get("reason") or "")
+
+    excel_rows = []
+    for row in rows:
+        note = str(row.get("note") or "")
+        original = note[len("VOID of "):] if note.startswith("VOID of ") else note
+        excel_rows.append({
+            "Original Receipt": original,
+            "Void Receipt": row.get("void_receipt") or "",
+            "Student": row.get("student") or "",
+            "Amount": float(row.get("amount") or 0),
+            "Reason": reasons.get(str(row.get("void_receipt") or ""), ""),
+        })
+    total = sum(row["Amount"] for row in excel_rows)
+    excel_rows.append({"Original Receipt": "TOTAL", "Void Receipt": "", "Student": "", "Amount": total, "Reason": ""})
+    headers = ["Original Receipt", "Void Receipt", "Student", "Amount", "Reason"]
+    title = "Void Payment Report"
+    stem = f"void_report_{datetime.now().strftime('%d%m%Y')}"
+    pdf_path = _output_path(f"{stem}.pdf")
+    story: list = []
+    _header(story, conn, title)
+    table_data = [headers] + [
+        [row["Original Receipt"], row["Void Receipt"], row["Student"], format_currency(row["Amount"]), row["Reason"]]
+        for row in excel_rows
+    ]
+    story.append(_table(table_data, [35 * mm, 35 * mm, 38 * mm, 28 * mm, 44 * mm], 6.8, right_columns=(3,)))
+    _document(pdf_path, title).build(story)
+    export_to_excel(excel_rows, headers, title, stem, _excel_metadata("note LIKE VOID%"))
+    return pdf_path
+
+
+def transfer_certificate(conn, student_id, override_dues=False, override_reason='') -> str:
+    """Generate and audit a transfer certificate, enforcing dues clearance."""
+    student = conn.execute(
+        """
+        SELECT id, name, class, section, guardian_name, created_at
+        FROM students WHERE id = ?
+        """,
+        (student_id,),
+    ).fetchone()
+    if student is None:
+        raise ValueError("Student was not found.")
+    student = dict(student) if hasattr(student, "keys") else dict(zip(
+        ("id", "name", "class", "section", "guardian_name", "created_at"), student
+    ))
+    payment_summary = conn.execute(
+        """
+        SELECT COUNT(*) AS payment_count, COALESCE(SUM(amount_paid), 0) AS lifetime_paid,
+               COALESCE(SUM(balance), 0) AS outstanding_dues
+        FROM payments WHERE student_id = ?
+        """,
+        (student_id,),
+    ).fetchone()
+    payment_count = int(payment_summary[0] or 0)
+    lifetime_paid = float(payment_summary[1] or 0)
+    dues = float(payment_summary[2] or 0)
+    if dues > 0 and not override_dues:
+        raise Exception(f"Dues: {format_currency(dues)}")
+    if dues > 0 and override_dues and not str(override_reason).strip():
+        raise ValueError("An override reason is required when dues remain.")
+
+    prior_tc = conn.execute(
+        "SELECT COUNT(*) FROM audit_log WHERE action = 'TC_ISSUED' AND record_id = ?",
+        (str(student_id),),
+    ).fetchone()[0] > 0
+    settings = _settings(conn)
+    school_name = settings.get("school_name") or SCHOOL_NAME
+    school_address = settings.get("school_address") or ""
+    logo_path = settings.get("logo_path") or ""
+    path = _output_path(f"TC_{student_id}_{datetime.now().strftime('%d%m%Y')}.pdf")
+    page_width, page_height = A4
+    pdf = canvas.Canvas(path, pagesize=A4)
+    pdf.setTitle(f"Transfer Certificate - {student['name']}")
+    if prior_tc:
+        pdf.saveState()
+        pdf.setFillColor(colors.HexColor("#cccccc"))
+        pdf.setFont(FONT_BOLD, 60)
+        pdf.translate(page_width / 2, page_height / 2)
+        pdf.rotate(45)
+        pdf.drawCentredString(0, 0, "DUPLICATE")
+        pdf.restoreState()
+
+    top = page_height - MARGIN
+    if logo_path and Path(logo_path).is_file():
+        pdf.drawImage(logo_path, MARGIN, top - 18 * mm, width=18 * mm, height=18 * mm, preserveAspectRatio=True, mask="auto")
+    pdf.setFillColor(colors.black)
+    pdf.setFont(FONT_BOLD, 18)
+    pdf.drawCentredString(page_width / 2, top - 8, school_name)
+    pdf.setFont(FONT, 10)
+    pdf.drawCentredString(page_width / 2, top - 24, school_address)
+    pdf.setFont(FONT_BOLD, 16)
+    pdf.drawCentredString(page_width / 2, top - 58, "TRANSFER CERTIFICATE")
+    pdf.line(MARGIN, top - 68, page_width - MARGIN, top - 68)
+
+    section = f" - {student['section']}" if student.get("section") else ""
+    admission = str(student.get("created_at") or "").split(" ")[0]
+    dues_status = "NIL" if dues <= 0 else f"{format_currency(dues)} cleared by Admin on {today_str()}"
+    fields = [
+        ("Name", student.get("name") or ""),
+        ("Father's Name", student.get("guardian_name") or ""),
+        ("Class Last Attended", f"{student.get('class') or ''}{section}"),
+        ("Date of Admission", admission),
+        ("Date of Leaving", today_str()),
+        ("Conduct", "Good"),
+        ("Dues Status", dues_status),
+    ]
+    y = top - 105
+    for label, value in fields:
+        pdf.setFont(FONT_BOLD, 11)
+        pdf.drawString(MARGIN + 12, y, f"{label}:")
+        pdf.setFont(FONT, 11)
+        pdf.drawString(MARGIN + 145, y, str(value))
+        pdf.line(MARGIN + 140, y - 3, page_width - MARGIN - 10, y - 3)
+        y -= 34
+    pdf.setFont(FONT, 10)
+    pdf.drawString(MARGIN + 12, y - 10, "This is to certify that the above particulars are correct as per school records.")
+    pdf.line(page_width - MARGIN - 150, MARGIN + 55, page_width - MARGIN, MARGIN + 55)
+    pdf.drawCentredString(page_width - MARGIN - 75, MARGIN + 40, "Principal Signature")
+    pdf.showPage()
+    pdf.save()
+
+    try:
+        import auth
+        user_id = auth.CURRENT_SESSION.user_id if auth.CURRENT_SESSION is not None else None
+        username = auth.CURRENT_SESSION.username if auth.CURRENT_SESSION is not None else "SYSTEM"
+    except (ImportError, AttributeError):
+        user_id, username = None, "SYSTEM"
+    log_action(
+        conn, user_id, "TC_ISSUED", "students", student_id, None,
+        json.dumps({
+            "student_id": student_id, "override_dues": bool(override_dues),
+            "override_reason": str(override_reason or ""), "issued_by": username,
+            "dues": dues, "payment_count": payment_count,
+            "lifetime_paid": lifetime_paid, "duplicate": prior_tc,
+        }, default=str),
+    )
+    return path
+
+
+def student_id_card(conn, student_ids: list) -> str:
+    """Generate two privacy-safe student ID cards per A4 page."""
+    ids = [int(student_id) for student_id in student_ids]
+    if not ids:
+        raise ValueError("Select at least one student.")
+    placeholders = ",".join("?" for _ in ids)
+    rows = _row_dicts(conn.execute(
+        f"""
+        SELECT id, name, class, section, aadhaar
+        FROM students WHERE id IN ({placeholders})
+        ORDER BY class, name
+        """,
+        ids,
+    ))
+    if not rows:
+        raise ValueError("No matching students were found.")
+    settings = _settings(conn)
+    school_name = settings.get("school_name") or SCHOOL_NAME
+    school_address = settings.get("school_address") or ""
+    logo_path = settings.get("logo_path") or ""
+    active = conn.execute("SELECT label FROM academic_years WHERE is_active = 1 LIMIT 1").fetchone()
+    academic_year = active[0] if active else ""
+    path = _output_path(f"ID_cards_{datetime.now().strftime('%d%m%Y')}.pdf")
+    page_width, page_height = A4
+    card_width, card_height = 85 * mm, 54 * mm
+    gap = 14 * mm
+    total_height = card_height * 2 + gap
+    first_y = (page_height + total_height) / 2 - card_height
+    x = (page_width - card_width) / 2
+    pdf = canvas.Canvas(path, pagesize=A4)
+    pdf.setTitle("Student ID Cards")
+    for index, student in enumerate(rows):
+        slot = index % 2
+        if index and slot == 0:
+            pdf.showPage()
+        y = first_y - slot * (card_height + gap)
+        pdf.setStrokeColor(colors.black)
+        pdf.setLineWidth(1)
+        pdf.rect(x, y, card_width, card_height)
+        if logo_path and Path(logo_path).is_file():
+            pdf.drawImage(logo_path, x + 4 * mm, y + card_height - 18 * mm, width=15 * mm, height=15 * mm, preserveAspectRatio=True, mask="auto")
+        pdf.setFillColor(colors.black)
+        pdf.setFont(FONT_BOLD, 11)
+        pdf.drawCentredString(x + card_width / 2 + 5 * mm, y + card_height - 8 * mm, school_name)
+        pdf.setFont(FONT, 6.5)
+        pdf.drawCentredString(x + card_width / 2 + 5 * mm, y + card_height - 13 * mm, school_address)
+        pdf.line(x + 3 * mm, y + card_height - 20 * mm, x + card_width - 3 * mm, y + card_height - 20 * mm)
+        pdf.setFont(FONT_BOLD, 10)
+        pdf.drawString(x + 5 * mm, y + 25 * mm, student.get("name") or "")
+        section = f" - {student.get('section')}" if student.get("section") else ""
+        pdf.setFont(FONT, 8)
+        pdf.drawString(x + 5 * mm, y + 19 * mm, f"Class: {student.get('class') or ''}{section}")
+        digits = "".join(character for character in str(student.get("aadhaar") or "") if character.isdigit())
+        last_four = digits[-4:] if digits else "----"
+        pdf.drawString(x + 5 * mm, y + 13 * mm, f"Aadhaar: XXXX XXXX {last_four}")
+        pdf.drawString(x + 5 * mm, y + 7 * mm, f"Academic Year: {academic_year}")
+        pdf.drawRightString(x + card_width - 4 * mm, y + 4 * mm, f"ID: {student['id']}")
+    pdf.showPage()
+    pdf.save()
     return path

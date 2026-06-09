@@ -8,13 +8,23 @@ import tkinter as tk
 from tkinter import ttk
 
 import auth
-from config import APP_TITLE, DB_PATH, SCHOOL_NAME, SPLASH_BG, SPLASH_FG
+from config import APP_TITLE, DB_PATH, SCHOOL_NAME
 from utils import format_currency
 
 ERROR_FG = "#ff6b6b"
 ENTRY_WIDTH = 30
 WINDOW_SIZE = "420x360"
 PASSWORD_MASK = "*"
+
+
+def _configured_school_name() -> str:
+    """Return the school name saved in settings, with the configured fallback."""
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            row = conn.execute("SELECT value FROM settings WHERE key='school_name'").fetchone()
+    except sqlite3.Error:
+        return SCHOOL_NAME
+    return str(row[0]) if row and row[0] else SCHOOL_NAME
 
 
 class LoginWindow(tk.Toplevel):
@@ -33,7 +43,10 @@ class LoginWindow(tk.Toplevel):
         self.error_var = tk.StringVar()
         self.title(APP_TITLE)
         self.geometry(WINDOW_SIZE)
-        self.configure(bg=SPLASH_BG)
+        from ui_theme import apply_theme
+
+        self.language, self.ui_font = apply_theme(self)
+        self.configure(bg=self._sfms_palette["bg"])
         self.resizable(False, False)
         self._center_window()
         self._build_widgets()
@@ -51,28 +64,30 @@ class LoginWindow(tk.Toplevel):
 
     def _build_widgets(self) -> None:
         """Build all login controls."""
-        tk.Label(self, text=SCHOOL_NAME, bg=SPLASH_BG, fg=SPLASH_FG, font=("Segoe UI", 14, "bold")).pack(pady=(28, 4))
-        tk.Label(self, text=APP_TITLE, bg=SPLASH_BG, fg=SPLASH_FG, font=("Segoe UI", 30, "bold")).pack(pady=(0, 20))
+        tk.Label(self, text=_configured_school_name(), bg=self._sfms_palette["bg"], fg=self._sfms_palette["fg"], font=("Segoe UI", 14, "bold")).pack(pady=(28, 4))
+        tk.Label(self, text=APP_TITLE, bg=self._sfms_palette["bg"], fg=self._sfms_palette["fg"], font=("Segoe UI", 30, "bold")).pack(pady=(0, 20))
 
-        form = tk.Frame(self, bg=SPLASH_BG)
+        form = tk.Frame(self, bg=self._sfms_palette["bg"])
         form.pack()
 
-        tk.Label(form, text="Username", bg=SPLASH_BG, fg=SPLASH_FG, anchor="w").grid(row=0, column=0, sticky="w")
+        from ui_strings import label
+
+        tk.Label(form, text=label("username", self.language), bg=self._sfms_palette["bg"], fg=self._sfms_palette["fg"], anchor="w", font=(self.ui_font, 10)).grid(row=0, column=0, sticky="w")
         self.username_entry = ttk.Entry(form, textvariable=self.username_var, width=ENTRY_WIDTH)
         self.username_entry.grid(row=1, column=0, columnspan=2, pady=(2, 10), sticky="ew")
 
-        tk.Label(form, text="Password", bg=SPLASH_BG, fg=SPLASH_FG, anchor="w").grid(row=2, column=0, sticky="w")
+        tk.Label(form, text=label("password", self.language), bg=self._sfms_palette["bg"], fg=self._sfms_palette["fg"], anchor="w", font=(self.ui_font, 10)).grid(row=2, column=0, sticky="w")
         self.password_entry = ttk.Entry(form, textvariable=self.password_var, width=ENTRY_WIDTH, show=PASSWORD_MASK)
         self.password_entry.grid(row=3, column=0, pady=(2, 10), sticky="ew")
-        ttk.Checkbutton(form, text="Show", variable=self.password_visible, command=self._toggle_password).grid(
+        ttk.Checkbutton(form, text=label("show", self.language), variable=self.password_visible, command=self._toggle_password).grid(
             row=3,
             column=1,
             padx=(8, 0),
             sticky="w",
         )
 
-        ttk.Button(form, text="Login", command=self._on_login_click).grid(row=4, column=0, columnspan=2, pady=(8, 8), sticky="ew")
-        tk.Label(form, textvariable=self.error_var, bg=SPLASH_BG, fg=ERROR_FG, wraplength=320).grid(
+        ttk.Button(form, text=label("login", self.language), command=self._on_login_click).grid(row=4, column=0, columnspan=2, pady=(8, 8), sticky="ew")
+        tk.Label(form, textvariable=self.error_var, bg=self._sfms_palette["bg"], fg=ERROR_FG, wraplength=320).grid(
             row=5,
             column=0,
             columnspan=2,
@@ -96,12 +111,33 @@ class LoginWindow(tk.Toplevel):
         success, message = auth.login(self.username_var.get(), self.password_var.get())
         if success:
             is_accountant = auth.CURRENT_SESSION is not None and auth.CURRENT_SESSION.role == "ACCOUNTANT"
-            self.destroy()
-            dashboard = self._open_dashboard()
-            if is_accountant:
-                self._load_accountant_dues_async(dashboard)
+            from ui_setup_wizard import SetupWizardWindow, setup_is_complete
+
+            if not setup_is_complete():
+                self.withdraw()
+                SetupWizardWindow(self, on_complete=lambda: self._finish_login(is_accountant))
+                return
+            with sqlite3.connect(DB_PATH) as conn:
+                row = conn.execute(
+                    "SELECT value FROM settings WHERE key=?",
+                    (f"force_password_change_user_{auth.CURRENT_SESSION.user_id}",),
+                ).fetchone()
+            if row and row[0] == "1":
+                from ui_users import MandatoryPasswordChangeDialog
+
+                self.withdraw()
+                MandatoryPasswordChangeDialog(self, lambda: self._finish_login(is_accountant))
+                return
+            self._finish_login(is_accountant)
             return
         self._show_login_error(message)
+
+    def _finish_login(self, is_accountant: bool) -> None:
+        """Close login gates and open the authenticated dashboard."""
+        self.destroy()
+        dashboard = self._open_dashboard()
+        if is_accountant:
+            self._load_accountant_dues_async(dashboard)
 
     def _on_close(self) -> None:
         """Run the application-level close reminder."""

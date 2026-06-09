@@ -325,6 +325,12 @@ def _seed_first_run(conn: sqlite3.Connection) -> None:
         (SETTING_LOGO_PATH, LOGO_PATH),
         (SETTING_SESSION_TIMEOUT_MINUTES, str(SESSION_TIMEOUT_DEFAULT)),
         (SETTING_BACKUP_INTERVAL_HOURS, str(BACKUP_INTERVAL_DEFAULT)),
+        ("setup_complete", "0"),
+        ("ui_theme", "light"),
+        ("ui_language", "en"),
+        ("backup_encryption_enabled", "0"),
+        ("master_backup_password_hash", ""),
+        ("gdrive_token_json", ""),
     )
     conn.executemany("INSERT INTO settings (key, value) VALUES (?, ?)", settings)
 

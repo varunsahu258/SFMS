@@ -4,14 +4,70 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from datetime import datetime
 import tkinter as tk
 from tkinter import ttk
 
 import auth
-from config import APP_TITLE, DB_PATH, SCHOOL_NAME, SPLASH_BG, SPLASH_FG
+from config import APP_TITLE, DB_PATH, SCHOOL_NAME
 from ui_change_password import ChangePasswordWindow
 
 WINDOW_SIZE = "700x900"
+
+
+def _parse_date(value: str | None) -> datetime | None:
+    """Parse the date formats used by SFMS rows."""
+    if not value:
+        return None
+    for date_format in ("%d-%m-%Y", "%Y-%m-%d", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(str(value), date_format)
+        except ValueError:
+            continue
+    return None
+
+
+def load_cashflow_summary(conn) -> tuple[str, list[tuple[str, float]]]:
+    """Return active-year month labels and net collected amounts for the canvas."""
+    year = conn.execute(
+        "SELECT label, start_date, end_date FROM academic_years WHERE is_active = 1 LIMIT 1"
+    ).fetchone()
+    if year is None:
+        return "", []
+    label, start_text, end_text = year[0], year[1], year[2]
+    start = _parse_date(start_text)
+    end = _parse_date(end_text)
+    if start is None or end is None:
+        return str(label or ""), []
+    month_keys: list[tuple[int, int]] = []
+    cursor_year, cursor_month = start.year, start.month
+    while (cursor_year, cursor_month) <= (end.year, end.month):
+        month_keys.append((cursor_year, cursor_month))
+        if cursor_month == 12:
+            cursor_year, cursor_month = cursor_year + 1, 1
+        else:
+            cursor_month += 1
+    totals = {key: 0.0 for key in month_keys}
+    for payment_date, amount_paid in conn.execute("SELECT payment_date, amount_paid FROM payments"):
+        parsed = _parse_date(payment_date)
+        if parsed is not None and start <= parsed <= end:
+            key = (parsed.year, parsed.month)
+            if key in totals:
+                totals[key] += float(amount_paid or 0)
+    return str(label or ""), [
+        (datetime(year_value, month_value, 1).strftime("%b"), totals[(year_value, month_value)])
+        for year_value, month_value in month_keys
+    ]
+
+
+def _configured_school_name() -> str:
+    """Return the school name saved in settings, with the configured fallback."""
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            row = conn.execute("SELECT value FROM settings WHERE key='school_name'").fetchone()
+    except sqlite3.Error:
+        return SCHOOL_NAME
+    return str(row[0]) if row and row[0] else SCHOOL_NAME
 
 
 class DashboardWindow(tk.Toplevel):
@@ -22,10 +78,16 @@ class DashboardWindow(tk.Toplevel):
         super().__init__(master)
         self.title(f"{APP_TITLE} Dashboard")
         self.geometry(WINDOW_SIZE)
-        self.configure(bg=SPLASH_BG)
         self.dismissed_notifications: set[str] = set()
+        self.cashflow_year = ""
+        self.cashflow_values: list[tuple[str, float]] = []
         self._center_window()
+        from ui_theme import apply_theme
+
+        self.language, self.ui_font = apply_theme(self)
+        self.configure(bg=self._sfms_palette["bg"])
         self._build_widgets()
+        self._bind_shortcuts()
         self._load_notifications_async()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -40,36 +102,208 @@ class DashboardWindow(tk.Toplevel):
 
     def _build_widgets(self) -> None:
         """Build the fixed notification area, dashboard labels, and buttons."""
-        self.notification_frame = tk.Frame(self, bg=SPLASH_BG, height=82)
+        from ui_strings import label
+
+        self.notification_frame = tk.Frame(self, bg=self._sfms_palette["bg"], height=82)
         self.notification_frame.pack(fill="x", padx=12, pady=(10, 0))
         self.notification_frame.pack_propagate(False)
-        tk.Label(self, text=SCHOOL_NAME, bg=SPLASH_BG, fg=SPLASH_FG, font=("Segoe UI", 18, "bold")).pack(pady=(12, 8))
-        tk.Label(self, text=f"{APP_TITLE} Dashboard", bg=SPLASH_BG, fg=SPLASH_FG, font=("Segoe UI", 26, "bold")).pack(pady=(0, 20))
+        tk.Label(self, text=_configured_school_name(), bg=self._sfms_palette["bg"], fg=self._sfms_palette["fg"], font=("Segoe UI", 18, "bold")).pack(pady=(12, 8))
+        tk.Label(self, text=f"{APP_TITLE} Dashboard", bg=self._sfms_palette["bg"], fg=self._sfms_palette["fg"], font=("Segoe UI", 26, "bold")).pack(pady=(0, 20))
         user_label = "Not signed in"
         if auth.CURRENT_SESSION is not None:
             user_label = f"Signed in as {auth.CURRENT_SESSION.username} ({auth.CURRENT_SESSION.role})"
-        tk.Label(self, text=user_label, bg=SPLASH_BG, fg=SPLASH_FG, font=("Segoe UI", 12)).pack(pady=(0, 20))
-        button_frame = tk.Frame(self, bg=SPLASH_BG)
-        button_frame.pack(pady=12)
-        ttk.Button(button_frame, text="Main Collection", command=self._on_main_collection_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text="Small Collection", command=self._on_small_collection_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text="Exemption Collection", command=self._on_exemption_collection_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text="Advance Payment", command=self._on_advance_payment_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text="Dues", command=self._on_dues_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text="Discounts", command=self._on_discount_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text="Exemptions", command=self._on_exemption_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text="Students", command=self._on_students_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text="Fee Heads", command=self._on_fee_heads_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text="Fee Structure", command=self._on_fee_structure_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text="Academic Years", command=self._on_academic_years_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text="Reports", command=self._on_reports_click).pack(fill="x", pady=5)
+        tk.Label(self, text=user_label, bg=self._sfms_palette["bg"], fg=self._sfms_palette["fg"], font=("Segoe UI", 12)).pack(pady=(0, 20))
+        content_frame = tk.Frame(self, bg=self._sfms_palette["bg"])
+        content_frame.pack(fill="both", expand=True, padx=18, pady=8)
+        button_column = tk.Frame(content_frame, bg=self._sfms_palette["bg"])
+        button_column.pack(side="left", fill="y", padx=(20, 12))
+        button_canvas = tk.Canvas(button_column, width=230, bg=self._sfms_palette["bg"], highlightthickness=0)
+        button_scroll = ttk.Scrollbar(button_column, orient="vertical", command=button_canvas.yview)
+        button_canvas.configure(yscrollcommand=button_scroll.set)
+        button_scroll.pack(side="right", fill="y")
+        button_canvas.pack(side="left", fill="y", expand=True)
+        button_frame = tk.Frame(button_canvas, bg=self._sfms_palette["bg"])
+        button_window = button_canvas.create_window((0, 0), window=button_frame, anchor="nw", width=220)
+        button_frame.bind("<Configure>", lambda _event: button_canvas.configure(scrollregion=button_canvas.bbox("all")))
+        button_canvas.bind("<Configure>", lambda event: button_canvas.itemconfigure(button_window, width=max(event.width - 4, 180)))
+        chart_frame = tk.Frame(content_frame, bg=self._sfms_palette["bg"])
+        chart_frame.pack(side="right", fill="both", expand=True, padx=(10, 16), pady=8)
+        self.cashflow_canvas = tk.Canvas(
+            chart_frame, width=300, height=180, bg="white",
+            highlightthickness=1, highlightbackground="#777777",
+        )
+        self.cashflow_canvas.pack(fill="both", expand=True)
+        self.cashflow_canvas.bind("<Configure>", self._draw_cashflow_chart)
+        ttk.Button(button_frame, text=label("main_collection", self.language), command=self._on_main_collection_click).pack(fill="x", pady=5)
+        ttk.Button(button_frame, text=label("small_collection", self.language), command=self._on_small_collection_click).pack(fill="x", pady=5)
+        ttk.Button(button_frame, text=label("exemption_collection", self.language), command=self._on_exemption_collection_click).pack(fill="x", pady=5)
+        ttk.Button(button_frame, text=label("advance_payment", self.language), command=self._on_advance_payment_click).pack(fill="x", pady=5)
+        ttk.Button(button_frame, text=label("dues", self.language), command=self._on_dues_click).pack(fill="x", pady=5)
+        ttk.Button(button_frame, text=label("discounts", self.language), command=self._on_discount_click).pack(fill="x", pady=5)
+        ttk.Button(button_frame, text=label("exemptions", self.language), command=self._on_exemption_click).pack(fill="x", pady=5)
+        ttk.Button(button_frame, text=label("students", self.language), command=self._on_students_click).pack(fill="x", pady=5)
+        ttk.Button(button_frame, text=label("fee_heads", self.language), command=self._on_fee_heads_click).pack(fill="x", pady=5)
+        ttk.Button(button_frame, text=label("fee_structure", self.language), command=self._on_fee_structure_click).pack(fill="x", pady=5)
+        ttk.Button(button_frame, text=label("academic_years", self.language), command=self._on_academic_years_click).pack(fill="x", pady=5)
+        ttk.Button(button_frame, text=label("reports", self.language), command=self._on_reports_click).pack(fill="x", pady=5)
         if auth.CURRENT_SESSION is not None and auth.CURRENT_SESSION.role == "ADMIN":
-            ttk.Button(button_frame, text="Receipt Reprint", command=self._on_receipt_reprint_click).pack(fill="x", pady=5)
-            ttk.Button(button_frame, text="Void Payment", command=self._on_void_payment_click).pack(fill="x", pady=5)
-            ttk.Button(button_frame, text="Audit Log", command=self._on_audit_log_click).pack(fill="x", pady=5)
-            ttk.Button(button_frame, text="Fee Notices", command=self._on_fee_notices_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text="Change Password", command=self._on_change_password_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text="Logout", command=self._on_logout_click).pack(fill="x", pady=5)
+            ttk.Button(button_frame, text=label("receipt_reprint", self.language), command=self._on_receipt_reprint_click).pack(fill="x", pady=5)
+            ttk.Button(button_frame, text=label("void_payment", self.language), command=self._on_void_payment_click).pack(fill="x", pady=5)
+            ttk.Button(button_frame, text=label("audit_log", self.language), command=self._on_audit_log_click).pack(fill="x", pady=5)
+            ttk.Button(button_frame, text=label("fee_notices", self.language), command=self._on_fee_notices_click).pack(fill="x", pady=5)
+            ttk.Button(button_frame, text=label("user_management", self.language), command=self._on_users_click).pack(fill="x", pady=5)
+            ttk.Button(button_frame, text=label("settings", self.language), command=self._on_settings_click).pack(fill="x", pady=5)
+        ttk.Button(button_frame, text=label("help", self.language), command=self._on_help_click).pack(fill="x", pady=5)
+        ttk.Button(button_frame, text=label("about", self.language), command=self._on_about_click).pack(fill="x", pady=5)
+        ttk.Button(button_frame, text=label("change_password", self.language), command=self._on_change_password_click).pack(fill="x", pady=5)
+        ttk.Button(button_frame, text=label("logout", self.language), command=self._on_logout_click).pack(fill="x", pady=5)
+
+    def _bind_shortcuts(self) -> None:
+        """Bind documented dashboard keyboard shortcuts to existing safe handlers."""
+        self.bind("<F1>", lambda _event: self._on_main_collection_click())
+        self.bind("<F2>", lambda _event: self._on_dues_click())
+        self.bind("<F3>", lambda _event: self._on_reports_click())
+        self.bind("<F4>", lambda _event: self._on_students_click())
+        self.bind("<F5>", lambda _event: self._open_backup_window())
+        self.bind("<Control-l>", lambda _event: self._on_logout_click())
+        self.bind("<Control-p>", lambda _event: self._on_receipt_reprint_click())
+        self.bind("<Escape>", self._close_focused_child)
+
+    def _close_focused_child(self, _event=None) -> None:
+        """Close the focused child window without accidentally closing the dashboard."""
+        auth.touch_session()
+        focused = self.focus_get()
+        if focused is not None:
+            top = focused.winfo_toplevel()
+            if top is not self:
+                top.destroy()
+
+    def _load_notifications_async(self) -> None:
+        """Load notification counts away from the Tk main thread."""
+        def worker() -> None:
+            try:
+                from notifications import get_notification_state
+
+                with sqlite3.connect(DB_PATH) as conn:
+                    conn.execute("PRAGMA foreign_keys=ON")
+                    conn.execute("PRAGMA journal_mode=WAL")
+                    state = get_notification_state(conn)
+                    cashflow_year, cashflow_values = load_cashflow_summary(conn)
+            except sqlite3.Error:
+                return
+            try:
+                self.after(0, lambda: self._apply_dashboard_data(state, cashflow_year, cashflow_values))
+            except tk.TclError:
+                return
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_dashboard_data(self, state: dict, year_label: str, values: list[tuple[str, float]]) -> None:
+        """Apply worker-loaded notifications and chart data on Tk's main thread."""
+        self.cashflow_year = year_label
+        self.cashflow_values = values
+        self._render_notifications(state)
+        self._draw_cashflow_chart()
+
+    def _draw_cashflow_chart(self, _event=None) -> None:
+        """Draw the active academic year's responsive monthly cashflow bars."""
+        if not hasattr(self, "cashflow_canvas"):
+            return
+        canvas = self.cashflow_canvas
+        canvas.delete("all")
+        width = max(canvas.winfo_width(), 300)
+        height = max(canvas.winfo_height(), 180)
+        canvas.create_text(
+            width / 2, 14, text=f"Collection — {self.cashflow_year or 'Academic Year'}",
+            font=("Segoe UI", 10, "bold"), fill="#111111",
+        )
+        left, right, top, bottom = 34, width - 8, 36, height - 28
+        canvas.create_line(left, top, left, bottom, fill="#333333")
+        canvas.create_line(left, bottom, right, bottom, fill="#333333")
+        values = self.cashflow_values
+        if not values:
+            canvas.create_text(width / 2, height / 2, text="No collection data", fill="#666666")
+            return
+        maximum = max(max(amount, 0) for _month, amount in values) or 1.0
+        slot = max((right - left) / len(values), 1)
+        bar_width = max(min(slot * 0.58, 24), 4)
+        plot_height = max(bottom - top - 14, 1)
+        for index, (month, amount) in enumerate(values):
+            x_center = left + slot * (index + 0.5)
+            positive_amount = max(amount, 0)
+            bar_height = plot_height * positive_amount / maximum
+            y_top = bottom - bar_height
+            canvas.create_rectangle(
+                x_center - bar_width / 2, y_top, x_center + bar_width / 2, bottom,
+                fill="#1a1a5e", outline="#1a1a5e",
+            )
+            amount_label = f"{amount / 1000:.1f}k" if abs(amount) >= 1000 else f"{amount:.0f}"
+            canvas.create_text(x_center, max(y_top - 7, top), text=amount_label, font=("Segoe UI", 6), fill="#222222")
+            canvas.create_text(x_center, bottom + 10, text=month, font=("Segoe UI", 7), fill="#222222")
+
+    def _render_notifications(self, state: dict) -> None:
+        """Render priority dues and backup banners inside the reserved frame."""
+        if not self.winfo_exists():
+            return
+        for child in self.notification_frame.winfo_children():
+            child.destroy()
+        overdue = None
+        for threshold, key, color in ((90, "overdue_90", "#b00020"), (60, "overdue_60", "#d2691e"), (30, "overdue_30", "#d4a900")):
+            if state.get(key, 0) and key not in self.dismissed_notifications:
+                overdue = (threshold, key, color, int(state[key]))
+                break
+        row = 0
+        if overdue:
+            threshold, key, color, count = overdue
+            self._banner_row(
+                row, key, color,
+                f"{count} students have fees overdue {threshold}+ days",
+                "View", lambda value=threshold: self._open_threshold_dues(value),
+            )
+            row += 1
+        if state.get("backup_overdue") and "backup" not in self.dismissed_notifications:
+            self._banner_row(
+                row, "backup", "#1f5f99",
+                "Backup overdue — Take backup now.",
+                "Backup Now", self._open_backup_window,
+            )
+
+    def _banner_row(self, row: int, key: str, color: str, text: str, action_text: str, action) -> None:
+        """Create one fixed-height notification banner row."""
+        banner = tk.Frame(self.notification_frame, bg=color, height=38)
+        banner.pack(fill="x", pady=(0, 3))
+        banner.pack_propagate(False)
+        tk.Label(banner, text=text, bg=color, fg="white", font=("Segoe UI", 10, "bold"), anchor="w").pack(side="left", padx=10, fill="x", expand=True)
+        ttk.Button(banner, text=action_text, command=action).pack(side="right", padx=4, pady=5)
+        ttk.Button(banner, text="X", width=3, command=lambda: self._dismiss_banner(key, banner)).pack(side="right", padx=(0, 6), pady=5)
+
+    def _dismiss_banner(self, key: str, banner: tk.Frame) -> None:
+        """Dismiss a notification for this in-memory login session."""
+        auth.touch_session()
+        self.dismissed_notifications.add(key)
+        banner.destroy()
+
+    def _open_threshold_dues(self, threshold: int) -> None:
+        """Open dues filtered to the selected overdue threshold."""
+        auth.touch_session()
+        from ui_dues import DuesWindow
+
+        DuesWindow(self, overdue_threshold=threshold)
+
+    def _open_backup_window(self) -> None:
+        """Open the manual backup window."""
+        auth.touch_session()
+        from ui_backup import BackupWindow
+
+        backup_window = BackupWindow(self)
+        self.wait_window(backup_window)
+        self._load_notifications_async()
+
+    def _on_close(self) -> None:
+        """Run the application-level close reminder."""
+        from main import on_closing
+
+        on_closing(self)
 
     def _load_notifications_async(self) -> None:
         """Load notification counts away from the Tk main thread."""
@@ -264,6 +498,35 @@ class DashboardWindow(tk.Toplevel):
         from ui_fee_notice import FeeNoticeWindow
 
         FeeNoticeWindow(self)
+
+
+    def _on_users_click(self) -> None:
+        """Open administrator user management."""
+        auth.touch_session()
+        from ui_users import UserManagementWindow
+
+        UserManagementWindow(self)
+
+    def _on_settings_click(self) -> None:
+        """Open administrator settings."""
+        auth.touch_session()
+        from ui_settings import SettingsWindow
+
+        SettingsWindow(self)
+
+    def _on_help_click(self) -> None:
+        """Open bundled offline help."""
+        auth.touch_session()
+        from ui_help import HelpWindow
+
+        HelpWindow(self)
+
+    def _on_about_click(self) -> None:
+        """Open application information."""
+        auth.touch_session()
+        from ui_about import AboutDialog
+
+        AboutDialog(self)
 
     def _on_change_password_click(self) -> None:
         """Touch the session and open the change-password window."""

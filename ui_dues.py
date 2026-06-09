@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import os
 import tkinter as tk
 from tkinter import messagebox, ttk
 
@@ -25,6 +26,7 @@ class DuesWindow(tk.Toplevel):
         self.search_var = tk.StringVar()
         self.class_var = tk.StringVar()
         self.rows = []
+        self.row_students: dict[str, dict] = {}
         self._build_widgets()
         self._load_classes()
         if self.overdue_threshold is not None:
@@ -42,6 +44,8 @@ class DuesWindow(tk.Toplevel):
         self.class_combo.pack(side="left", padx=6)
         ttk.Button(top, text="Load", command=self.load_dues).pack(side="left", padx=6)
         ttk.Button(top, text="Export", command=self.export).pack(side="right")
+        ttk.Button(top, text="Print Dues Statement", command=self.print_student_statement).pack(side="right", padx=4)
+        ttk.Button(top, text="Issue TC", command=self.issue_tc).pack(side="right", padx=4)
         columns = ("student", "fee_head", "amount_due", "paid", "balance", "due_date", "days")
         self.tree = ttk.Treeview(self, columns=columns, show="headings")
         headings = ("Student", "Fee Head", "Amount Due", "Paid", "Balance", "Due Date", "Days Overdue")
@@ -65,6 +69,7 @@ class DuesWindow(tk.Toplevel):
         term = f"%{self.search_var.get().strip()}%"
         class_filter = self.class_var.get()
         self.rows = []
+        self.row_students: dict[str, dict] = {}
         with connect_db() as conn:
             year = active_academic_year(conn)
             params = [year, term, term]
@@ -74,7 +79,8 @@ class DuesWindow(tk.Toplevel):
                 params.append(class_filter)
             rows = conn.execute(
                 f"""
-                SELECT s.name AS student, fh.name AS fee_head, fs.amount AS amount_due, fs.due_date,
+                SELECT s.id AS student_id, s.name AS student, s.class AS student_class,
+                       fh.name AS fee_head, fs.amount AS amount_due, fs.due_date,
                        COALESCE(SUM(p.amount_paid), 0) AS paid,
                        fs.amount - COALESCE(SUM(p.amount_paid), 0) AS balance,
                        MIN(p.payment_date) AS oldest_payment_date
@@ -97,8 +103,55 @@ class DuesWindow(tk.Toplevel):
                 row["student"], row["fee_head"], format_currency(row["amount_due"] or 0),
                 format_currency(row["paid"] or 0), format_currency(row["balance"] or 0), row["due_date"] or "", days,
             )
-            self.rows.append(dict(row) | {"days_overdue": days})
-            self.tree.insert("", "end", values=values, tags=("overdue",) if days > 30 else ())
+            row_data = dict(row) | {"days_overdue": days}
+            self.rows.append(row_data)
+            item = self.tree.insert("", "end", values=values, tags=("overdue",) if days > 30 else ())
+            self.row_students[item] = row_data
+
+    def _selected_student(self) -> dict | None:
+        """Return student metadata for the selected dues row."""
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showwarning("Dues", "Select a student dues row first.", parent=self)
+            return None
+        return self.row_students.get(selected[0])
+
+    @auth.require_role("ADMIN")
+    def issue_tc(self) -> None:
+        """Issue or override a transfer certificate from the selected dues row."""
+        auth.touch_session()
+        row = self._selected_student()
+        if row is None:
+            return
+        from ui_students import DuesClearanceDialog
+
+        DuesClearanceDialog(self, int(row["student_id"]), on_issued=self._tc_issued)
+
+    def _tc_issued(self, path: str) -> None:
+        """Open the TC and refresh dues after successful archival."""
+        self.load_dues()
+        if hasattr(os, "startfile"):
+            os.startfile(path)
+        messagebox.showinfo("Transfer Certificate", f"TC saved to:\n{path}", parent=self)
+
+    def print_student_statement(self) -> None:
+        """Generate a single-student dues statement PDF."""
+        auth.touch_session()
+        row = self._selected_student()
+        if row is None:
+            return
+        from report_generator import classwise_dues_report
+
+        try:
+            with connect_db() as conn:
+                year = active_academic_year(conn)
+                path = classwise_dues_report(conn, row["student_class"], year, int(row["student_id"]))
+        except Exception as exc:
+            messagebox.showerror("Dues Statement", str(exc), parent=self)
+            return
+        if hasattr(os, "startfile"):
+            os.startfile(path)
+        messagebox.showinfo("Dues Statement", f"PDF saved to:\n{path}", parent=self)
 
     def export(self) -> None:
         """Export dues using the report-generator stub."""
