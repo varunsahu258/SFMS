@@ -182,6 +182,13 @@ def install_ledger_schema(conn: sqlite3.Connection) -> None:
         LEFT JOIN adjustment_totals x ON x.charge_id=c.id;
         """
     )
+    payment_columns = _columns(conn, "payments")
+    if "payment_intent" not in payment_columns:
+        conn.execute("ALTER TABLE payments ADD COLUMN payment_intent TEXT NOT NULL DEFAULT 'REGULAR' CHECK(payment_intent IN ('REGULAR','ADVANCE','VOID'))")
+    if "allocated_academic_year_id" not in payment_columns:
+        conn.execute("ALTER TABLE payments ADD COLUMN allocated_academic_year_id INTEGER REFERENCES academic_years(id)")
+    if "allocated_term" not in payment_columns:
+        conn.execute("ALTER TABLE payments ADD COLUMN allocated_term TEXT")
     if "academic_year" not in _columns(conn, "discounts"):
         conn.execute("ALTER TABLE discounts ADD COLUMN academic_year TEXT")
     if "charge_id" not in _columns(conn, "discounts"):

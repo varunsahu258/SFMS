@@ -9,14 +9,13 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 import auth
-from audit import log_action
 from config import DB_PATH, SPLASH_BG, SPLASH_FG
-from ledger import active_academic_year, allocate_payment, charge_rows
+from ledger import active_academic_year, charge_rows
 from money import OverpaymentError, max_payment_amount, validate_payment_amount
 from payment_controls import normalize_reference
-from receipt_integrity import sign_receipt
 from receipt_printing import PrintFailureDialog, print_committed_receipt
-from utils import format_currency, generate_receipt_no, now_str, today_str
+from financial_operations import record_collection
+from utils import format_currency
 
 PAYMENT_MODES = ("CASH", "CHEQUE", "UPI")
 MODE_LABELS = ("Cash", "Cheque", "UPI")
@@ -72,6 +71,7 @@ def fee_rows(conn: sqlite3.Connection, student_id: int, register_types: tuple[st
             "charge_id": int(row["charge_id"]),
             "fee_head_id": int(row["fee_head_id"]),
             "academic_year": row["academic_year"],
+            "due_date": row["due_date"],
             "name": row["fee_head"],
             "amount_due": balance,
             "base_due": float(row["original_amount"] or 0),
@@ -341,61 +341,17 @@ class CollectionBaseWindow(tk.Toplevel):
         total = sum(item["amount_paying"] for item in payable)
         if not messagebox.askyesno("Confirm collection", f"Collect {format_currency(total)}?"):
             return
-        with connect_db() as conn:
-            receipt_no = generate_receipt_no(conn)
-            payment_date = today_str()
-            payment_ids = []
-            for item in payable:
-                amount_due = str(Decimal(str(item["amount_due"])))
-                amount_paid = str(item["amount_paying"])
-                # Legacy payments.balance is not authoritative; charge_ledger derives outstanding.
-                balance = 0.0
-                payment_hash = ""
-                cursor = conn.execute(
-                    """
-                    INSERT INTO payments (
-                        student_id, receipt_no, fee_head_id, amount_due, amount_paid, balance,
-                        payment_date, collected_by, payment_mode, note, hash,
-                        cheque_number, upi_reference, cheque_status
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        self.selected_student_id, receipt_no, item["fee_head_id"], amount_due, amount_paid, balance,
-                        payment_date, auth.CURRENT_SESSION.user_id, item["mode"], item.get("note", ""), payment_hash,
-                        item.get("cheque_no") if item["mode"] == "CHEQUE" else None,
-                        item.get("note") if item["mode"] == "UPI" else None,
-                        "PENDING" if item["mode"] == "CHEQUE" else None,
-                    ),
+        try:
+            with connect_db() as conn:
+                result = record_collection(
+                    conn, self.selected_student_id, self.receipt_type,
+                    auth.CURRENT_SESSION.user_id, payable,
                 )
-                payment_ids.append(cursor.lastrowid)
-                allocate_payment(conn, cursor.lastrowid, item["charge_id"], amount_paid, "PAYMENT")
-                if item["mode"] == "CHEQUE":
-                    conn.execute(
-                        """
-                        INSERT INTO cheque_tracker (payment_id, cheque_no, bank, amount, collected_on, status, updated_at)
-                        VALUES (?, ?, ?, ?, ?, 'PENDING', ?)
-                        """,
-                        (cursor.lastrowid, item["cheque_no"], item["bank"], amount_paid, payment_date, now_str()),
-                    )
-            receipt_cursor = conn.execute(
-                """
-                INSERT INTO receipts (receipt_no, student_id, total_paid, receipt_type, printed_at, printed_by, reprint_count)
-                VALUES (?, ?, ?, ?, ?, ?, 0)
-                """,
-                (receipt_no, self.selected_student_id, total, self.receipt_type, now_str(), auth.CURRENT_SESSION.user_id),
-            )
-            sign_receipt(conn, receipt_cursor.lastrowid)
-            log_action(
-                conn,
-                auth.CURRENT_SESSION.user_id,
-                "PAYMENT_COLLECTED",
-                "payments",
-                receipt_no,
-                None,
-                json.dumps({"receipt_no": receipt_no, "payment_ids": payment_ids, "total_paid": total}, default=str),
-            )
-            conn.commit()
-            committed_receipt_id = int(receipt_cursor.lastrowid)
+        except Exception as exc:
+            messagebox.showerror("Collection", str(exc), parent=self)
+            return
+        receipt_no = result["receipt_no"]
+        committed_receipt_id = result["receipt_id"]
         try:
             print_committed_receipt(committed_receipt_id, receipt_no)
         except Exception as exc:

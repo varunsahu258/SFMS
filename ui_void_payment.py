@@ -8,7 +8,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 import auth
-from audit import log_action
+from audit import log_financial_action
 from config import DB_PATH, SPLASH_BG, SPLASH_FG
 from ledger import allocate_payment
 from receipt_integrity import sign_receipt
@@ -59,8 +59,9 @@ def create_void_receipt(
             INSERT INTO payments (
                 student_id, receipt_no, fee_head_id, amount_due,
                 amount_paid, balance, payment_date, collected_by,
-                payment_mode, note, hash, cheque_status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                payment_mode, note, hash, cheque_status, payment_intent,
+                allocated_academic_year_id, allocated_term
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'VOID', ?, ?)
             """,
             (
                 original["student_id"], void_receipt_no,
@@ -69,6 +70,7 @@ def create_void_receipt(
                 user_id, original["payment_mode"],
                 f"VOID of {original_receipt_no}", payment_hash,
                 "CLEARED" if str(original["payment_mode"] or "").upper()=="CHEQUE" else None,
+                original.get("allocated_academic_year_id"), original.get("allocated_term"),
             ),
         )
         allocations = conn.execute(
@@ -92,23 +94,12 @@ def create_void_receipt(
         (void_receipt_no, original_receipt["student_id"], total_voided, now_str(), user_id),
     )
     sign_receipt(conn, receipt_cursor.lastrowid)
-    log_action(
-        conn,
-        user_id,
-        "PAYMENT_VOID",
-        "payments",
-        void_receipt_no,
-        None,
-        json.dumps(
-            {
-                "reason": reason,
-                "original_receipt_no": original_receipt_no,
-                "void_receipt_no": void_receipt_no,
-                "void_payment_ids": void_payment_ids,
-                "total_voided": total_voided,
-            },
-            default=str,
-        ),
+    log_financial_action(
+        conn, "PAYMENT_VOID", user_id,
+        {"table": "payments", "record_id": void_receipt_no,
+         "reason": reason, "original_receipt_no": original_receipt_no,
+         "void_receipt_no": void_receipt_no, "void_payment_ids": void_payment_ids,
+         "total_voided": total_voided},
     )
     return void_receipt_no
 

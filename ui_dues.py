@@ -10,6 +10,7 @@ from tkinter import messagebox, ttk
 import auth
 from config import SPLASH_BG, SPLASH_FG
 from ledger import active_academic_year, ensure_student_charges
+from ledger_service import LedgerService
 from ui_collection_common import connect_db
 from utils import format_currency, today_str
 
@@ -73,33 +74,20 @@ class DuesWindow(tk.Toplevel):
         self.row_students: dict[str, dict] = {}
         with connect_db() as conn:
             year = active_academic_year(conn)
-            params = [year, term, term]
-            class_sql = ""
-            if class_filter:
-                class_sql = " AND s.class = ?"
-                params.append(class_filter)
             ensure_student_charges(conn, year)
-            rows = conn.execute(
-                f"""
-                SELECT s.id AS student_id, s.name AS student, s.class AS student_class,
-                       fh.name AS fee_head, l.original_amount AS amount_due, l.due_date,
-                       l.paid, l.adjustments, l.balance
-                FROM charge_ledger l
-                JOIN students s ON s.id=l.student_id
-                JOIN fee_heads fh ON fh.id=l.fee_head_id
-                WHERE l.academic_year=? AND l.balance>0 AND l.status<>'CANCELLED'
-                      AND s.is_active=1 AND (s.name LIKE ? OR s.aadhaar LIKE ?){class_sql}
-                ORDER BY s.class, s.name, fh.name
-                """,
-                params,
-            ).fetchall()
+            rows = LedgerService(conn).get_all_outstanding(year)
+            rows = [row for row in rows if (
+                (not class_filter or row["student_class"] == class_filter)
+                and (self.search_var.get().strip().lower() in str(row["student"]).lower()
+                     or self.search_var.get().strip().lower() in str(row.get("aadhaar") or "").lower())
+            )]
         if self.overdue_threshold is not None:
             rows = [row for row in rows if days_overdue(row["due_date"]) >= self.overdue_threshold]
         for row in rows:
             days = days_overdue(row["oldest_payment_date"] or row["due_date"])
             values = (
                 row["student"], row["fee_head"], format_currency(row["amount_due"] or 0),
-                format_currency(row["paid"] or 0), format_currency(row["balance"] or 0), row["due_date"] or "", days,
+                format_currency(row["paid"] or 0), format_currency(row["outstanding"] or 0), row["due_date"] or "", days,
             )
             row_data = dict(row) | {"days_overdue": days}
             self.rows.append(row_data)

@@ -154,3 +154,45 @@ def test_partial_and_full_payment_voids_restore_derived_outstanding():
     assert conn.execute(
         "SELECT COUNT(*) FROM payments WHERE note LIKE 'VOID of %' AND balance=0"
     ).fetchone()[0] == 2
+
+
+def test_advance_payment_persists_year_term_and_receipt(monkeypatch):
+    import base64
+    from financial_operations import record_advance_payment
+
+    monkeypatch.setenv("SFMS_INTEGRITY_KEY", base64.urlsafe_b64encode(b"a" * 32).decode("ascii"))
+    conn = sqlite3.connect(":memory:")
+    schema(conn)
+    conn.execute("UPDATE fee_structure SET amount=100 WHERE academic_year='2026-27'")
+    ensure_student_charges(conn, "2026-27", 1)
+    charge = charge_rows(conn, 1, "2026-27")[0]
+    result = record_advance_payment(
+        conn, 1, charge["charge_id"], 1, 30, 2, "2026-27", "01-04-2026", 1,
+    )
+    payment = conn.execute(
+        "SELECT payment_intent,allocated_academic_year_id,allocated_term FROM payments WHERE id=?",
+        (result["payment_id"],),
+    ).fetchone()
+    assert tuple(payment) == ("ADVANCE", 2, "01-04-2026")
+    receipt = conn.execute("SELECT receipt_type FROM receipts WHERE id=?", (result["receipt_id"],)).fetchone()
+    assert receipt[0] == "ADVANCE RECEIPT"
+
+
+def test_regular_collection_helper_commits_receipt_and_allocation(monkeypatch):
+    import base64
+    from financial_operations import record_collection
+
+    monkeypatch.setenv("SFMS_INTEGRITY_KEY", base64.urlsafe_b64encode(b"b" * 32).decode("ascii"))
+    conn = sqlite3.connect(":memory:")
+    schema(conn)
+    conn.execute("UPDATE fee_structure SET amount=100 WHERE academic_year='2026-27'")
+    ensure_student_charges(conn, "2026-27", 1)
+    charge = charge_rows(conn, 1, "2026-27")[0]
+    result = record_collection(conn, 1, "BIG", 1, [{
+        "fee_head_id": 1, "charge_id": charge["charge_id"], "amount_due": 100,
+        "amount_paying": 40, "mode": "CASH", "academic_year": "2026-27",
+        "due_date": "01-04-2026", "note": "",
+    }])
+    assert conn.execute("SELECT COUNT(*) FROM payments WHERE receipt_no=?", (result["receipt_no"],)).fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM receipts WHERE id=?", (result["receipt_id"],)).fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM audit_log WHERE action='PAYMENT_COLLECTED'").fetchone()[0] == 1

@@ -49,16 +49,28 @@ def _receipt_data(conn, receipt_no: str) -> dict:
     columns = [description[0] for description in conn.execute("SELECT r.*, s.name AS student_name, s.class AS student_class, s.section AS student_section, u.username AS printed_by_name FROM receipts r JOIN students s ON s.id = r.student_id LEFT JOIN users u ON u.id = r.printed_by WHERE 0").description]
     receipt_values = dict(zip(columns, receipt)) if not hasattr(receipt, "keys") else dict(receipt)
 
+    payment_columns_available = {row[1] for row in conn.execute("PRAGMA table_info(payments)")}
+    has_intent = "payment_intent" in payment_columns_available
+    has_years = "allocated_academic_year_id" in payment_columns_available and conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='academic_years'"
+    ).fetchone()
+    intent_columns = (
+        "p.payment_intent,p.allocated_term,ay.label AS allocated_academic_year,"
+        if has_intent and has_years else
+        "'REGULAR' AS payment_intent,NULL AS allocated_term,NULL AS allocated_academic_year,"
+    )
+    year_join = "LEFT JOIN academic_years ay ON ay.id=p.allocated_academic_year_id" if has_intent and has_years else ""
     payment_cursor = conn.execute(
-        """
+        f"""
         SELECT p.id, p.fee_head_id, COALESCE(l.original_amount,p.amount_due) AS amount_due,
                p.amount_paid, COALESCE(l.balance,0) AS balance,
-               p.payment_date, p.payment_mode, p.note, fh.name AS fee_head,
+               p.payment_date, p.payment_mode, p.note, {intent_columns} fh.name AS fee_head,
                u.username AS collected_by_name, ct.cheque_no, ct.bank
         FROM payments p
         LEFT JOIN payment_allocations pa ON pa.payment_id=p.id
         LEFT JOIN charge_ledger l ON l.charge_id=pa.charge_id
         LEFT JOIN fee_heads fh ON fh.id = p.fee_head_id
+        {year_join}
         LEFT JOIN users u ON u.id = p.collected_by
         LEFT JOIN cheque_tracker ct ON ct.payment_id = p.id
         WHERE p.receipt_no = ?
@@ -209,6 +221,11 @@ def _draw_copy(
     pdf.setFont(FONT, 8.5)
     if total_balance > 0:
         pdf.drawString(left, footer_y + 14, f"Balance: {format_currency(total_balance)}")
+    advance = next((payment for payment in data["payments"] if payment.get("payment_intent") == "ADVANCE"), None)
+    if advance:
+        pdf.drawString(left, footer_y + 14, _fit_text(
+            f"Allocated: {advance.get('allocated_academic_year') or ''} / {advance.get('allocated_term') or ''}",
+            width - 85, FONT, 8.5))
     pdf.drawString(left, footer_y, _fit_text(f"Payment Mode: {_payment_mode_text(data['payments'])}", width - 85, FONT, 8.5))
     pdf.drawImage(qr_reader, right - 48, y + 8, width=42, height=42, preserveAspectRatio=True, mask="auto")
 

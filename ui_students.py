@@ -11,7 +11,8 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import auth
 from config import SPLASH_BG, SPLASH_FG, STATUS_ACTIVE
-from ledger import active_academic_year, all_outstanding_total, charge_rows
+from ledger import active_academic_year, charge_rows
+from ledger_service import LedgerService
 from ui_master_utils import audit, connect_db, ensure_admin_write
 from utils import format_currency, now_str
 
@@ -72,17 +73,11 @@ PHONE_RE = re.compile(r"^\d{10}$")
 
 def student_dues_rows(conn: sqlite3.Connection, student_id: int) -> list[dict]:
     """Return authoritative active-year itemized dues for one student."""
-    rows = charge_rows(conn, student_id, active_academic_year(conn))
-    return [
-        {
-            "fee_head": row["fee_head"],
-            "amount_due": float(row["original_amount"] or 0),
-            "paid": float(row["paid"] or 0),
-            "adjustments": float(row["adjustments"] or 0),
-            "balance": float(row["balance"] or 0),
-        }
-        for row in rows if float(row["balance"] or 0) > 0
-    ]
+    rows = LedgerService(conn).get_all_outstanding(active_academic_year(conn))
+    return [{"fee_head": row["fee_head"], "amount_due": float(row["original_amount"]),
+             "paid": float(row["paid"]), "adjustments": float(row["adjustments"]),
+             "balance": float(row["outstanding"])}
+            for row in rows if row["student_id"] == student_id]
 
 
 def issue_student_tc(conn: sqlite3.Connection, student_id: int, override_dues=False, override_reason="") -> str:
@@ -289,7 +284,7 @@ class StudentWindow(tk.Toplevel):
         if student_id is None or not ensure_admin_write():
             return
         with connect_db() as conn:
-            due = all_outstanding_total(conn, student_id)
+            due = LedgerService(conn).get_outstanding(student_id, academic_year_id=None)
             if due and not messagebox.askyesno("Unpaid dues", f"Student has unpaid dues of Rs. {due:,.2f}. Deactivate anyway?"):
                 return
             old = dict(conn.execute("SELECT * FROM students WHERE id = ?", (student_id,)).fetchone())
@@ -304,7 +299,7 @@ class StudentWindow(tk.Toplevel):
         if student_id is None or not ensure_admin_write():
             return
         with connect_db() as conn:
-            due = all_outstanding_total(conn, student_id)
+            due = LedgerService(conn).get_outstanding(student_id, academic_year_id=None)
             if due > 0:
                 messagebox.showerror("Cannot mark left", f"Student has unpaid dues of Rs. {due:,.2f}.")
                 return
@@ -330,7 +325,7 @@ class StudentWindow(tk.Toplevel):
             if student is None or not student["is_active"] or student["status"] != "ACTIVE":
                 messagebox.showerror("Transfer Certificate", "TC is enabled only for ACTIVE students.", parent=self)
                 return
-            total_dues = float(all_outstanding_total(conn, student_id) or 0)
+            total_dues = float(LedgerService(conn).get_outstanding(student_id, academic_year_id=None) or 0)
             if total_dues > 0:
                 DuesClearanceDialog(self, student_id, on_issued=self._tc_issued)
                 return

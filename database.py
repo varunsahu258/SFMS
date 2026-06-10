@@ -113,9 +113,13 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             cheque_status TEXT CHECK(cheque_status IN ('PENDING','CLEARED','BOUNCED','CANCELLED') OR cheque_status IS NULL),
             cheque_cleared_date TEXT,
             cheque_bank_reference TEXT,
+            payment_intent TEXT NOT NULL DEFAULT 'REGULAR' CHECK(payment_intent IN ('REGULAR','ADVANCE','VOID')),
+            allocated_academic_year_id INTEGER,
+            allocated_term TEXT,
             FOREIGN KEY (student_id) REFERENCES students(id),
             FOREIGN KEY (fee_head_id) REFERENCES fee_heads(id),
-            FOREIGN KEY (collected_by) REFERENCES users(id)
+            FOREIGN KEY (collected_by) REFERENCES users(id),
+            FOREIGN KEY (allocated_academic_year_id) REFERENCES academic_years(id)
         );
 
         CREATE TABLE IF NOT EXISTS receipts (

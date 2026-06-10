@@ -21,7 +21,8 @@ from reportlab.pdfgen import canvas
 from config import REPORTS_DIR, SCHOOL_NAME
 from excel_exporter import export_to_excel
 from audit import log_action
-from ledger import active_academic_year, all_outstanding_total, ensure_student_charges
+from ledger import active_academic_year, ensure_student_charges
+from ledger_service import LedgerService
 from payment_controls import payment_revenue_amount, uncleared_cheque_amount
 from utils import format_currency, today_str
 
@@ -309,20 +310,11 @@ def classwise_dues_report(conn, class_name, academic_year, student_id=None) -> s
     """Generate outstanding fee-head balances for every student in a class."""
     if academic_year == active_academic_year(conn):
         ensure_student_charges(conn, academic_year, student_id)
-    rows = _row_dicts(conn.execute(
-        """
-        SELECT s.id AS student_id,s.name AS student,fh.name AS fee_head,
-               l.original_amount AS amount_due,l.due_date,l.paid,l.adjustments,l.balance
-        FROM charge_ledger l
-        JOIN students s ON s.id=l.student_id
-        JOIN fee_heads fh ON fh.id=l.fee_head_id
-        LEFT JOIN fee_structure fs ON fs.id=l.fee_structure_id
-        WHERE l.academic_year=? AND COALESCE(fs.class,s.class)=? AND s.is_active=1
-              AND l.balance>0 AND l.status<>'CANCELLED' AND (? IS NULL OR s.id=?)
-        ORDER BY s.name,fh.name
-        """,
-        (academic_year, class_name, student_id, student_id),
-    ))
+    rows = LedgerService(conn).get_all_outstanding(academic_year)
+    rows = [row | {"amount_due": row["original_amount"], "balance": row["outstanding"],
+                   "class": row["student_class"]}
+            for row in rows if row["student_class"] == class_name
+            and (student_id is None or row["student_id"] == student_id)]
     today = date.today()
     data = [["Student", "Fee Head", "Amount Due", "Paid", "Balance", "Days Overdue"]]
     for row in rows:
@@ -348,15 +340,9 @@ def defaulter_report(conn, days_threshold) -> str:
     current_year = active_academic_year(conn)
     if current_year:
         ensure_student_charges(conn, current_year)
-    rows = _row_dicts(conn.execute(
-        """
-        SELECT s.id,s.name AS student,s.class,l.due_date,l.balance,fh.name AS fee_head
-        FROM charge_ledger l JOIN students s ON s.id=l.student_id
-        JOIN fee_heads fh ON fh.id=l.fee_head_id
-        WHERE l.balance>0 AND l.status<>'CANCELLED' AND s.is_active=1
-        ORDER BY s.name,l.due_date
-        """
-    ))
+    rows = [row | {"id": row["student_id"], "class": row["student_class"],
+                   "balance": row["outstanding"]}
+            for row in LedgerService(conn).get_all_outstanding(current_year)]
     groups: dict[int, dict] = {}
     for row in rows:
         payment_date = _parse_date(row.get("due_date"))
@@ -384,16 +370,23 @@ def ytd_report(conn, academic_year) -> str:
     """Generate expected, collected, and outstanding totals per class."""
     if academic_year == active_academic_year(conn):
         ensure_student_charges(conn, academic_year)
-    expected_rows = _row_dicts(conn.execute(
-        """
-        SELECT COALESCE(fs.class,s.class) AS class,COUNT(DISTINCT s.id) AS student_count,
-               SUM(l.original_amount) AS expected,SUM(l.paid) AS collected,SUM(l.balance) AS outstanding
-        FROM charge_ledger l JOIN students s ON s.id=l.student_id
-        LEFT JOIN fee_structure fs ON fs.id=l.fee_structure_id
-        WHERE l.academic_year=? AND l.status<>'CANCELLED'
-        GROUP BY COALESCE(fs.class,s.class) ORDER BY class
-        """, (academic_year,)
+    ledger_rows = LedgerService(conn).get_all_outstanding(academic_year)
+    charge_rows_all = _row_dicts(conn.execute(
+        "SELECT c.*,s.class AS student_class FROM student_charges c JOIN students s ON s.id=c.student_id WHERE c.academic_year=? AND c.status<>'CANCELLED'",
+        (academic_year,),
     ))
+    grouped = {}
+    outstanding_by_charge = {row["charge_id"]: float(row["outstanding"]) for row in ledger_rows}
+    for charge in charge_rows_all:
+        group = grouped.setdefault(charge["student_class"], {"class": charge["student_class"], "students": set(), "expected": 0.0, "outstanding": 0.0})
+        group["students"].add(charge["student_id"])
+        group["expected"] += float(charge["original_amount"] or 0)
+        group["outstanding"] += outstanding_by_charge.get(charge["id"], 0.0)
+    expected_rows = [{"class": key, "student_count": len(value["students"]),
+                      "expected": value["expected"],
+                      "outstanding": value["outstanding"],
+                      "collected": value["expected"]-value["outstanding"]}
+                     for key, value in sorted(grouped.items())]
     data = [["Class", "Students", "Expected", "Collected", "Outstanding"]]
     expected_total = collected_total = outstanding_total = 0.0
     for row in expected_rows:
@@ -514,18 +507,10 @@ def fee_notice_pdf(conn, class_name) -> str:
     """Generate one black-and-white A4 fee notice per student with dues."""
     year = active_academic_year(conn)
     ensure_student_charges(conn, year)
-    rows = _row_dicts(conn.execute(
-        """
-        SELECT s.id AS student_id,s.name AS student,s.class,fh.name AS fee_head,
-               l.original_amount AS amount_due,l.due_date,l.paid,l.adjustments,l.balance
-        FROM charge_ledger l JOIN students s ON s.id=l.student_id
-        JOIN fee_heads fh ON fh.id=l.fee_head_id
-        LEFT JOIN fee_structure fs ON fs.id=l.fee_structure_id
-        WHERE l.academic_year=? AND COALESCE(fs.class,s.class)=? AND s.is_active=1
-              AND l.balance>0 AND l.status<>'CANCELLED'
-        ORDER BY s.name,fh.name
-        """, (year,class_name)
-    ))
+    rows = [row | {"class": row["student_class"], "amount_due": row["original_amount"],
+                   "balance": row["outstanding"]}
+            for row in LedgerService(conn).get_all_outstanding(year)
+            if row["student_class"] == class_name]
     students: dict[int, dict] = {}
     for row in rows:
         student = students.setdefault(
@@ -842,7 +827,7 @@ def transfer_certificate(conn, student_id, override_dues=False, override_reason=
     ).fetchone()
     payment_count = int(payment_summary[0] or 0)
     lifetime_paid = float(payment_summary[1] or 0)
-    dues = all_outstanding_total(conn, student_id)
+    dues = float(LedgerService(conn).get_outstanding(student_id, academic_year_id=None))
     if dues > 0 and not override_dues:
         raise Exception(f"Dues: {format_currency(dues)}")
     if dues > 0 and override_dues and not str(override_reason).strip():

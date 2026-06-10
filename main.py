@@ -8,6 +8,7 @@ import time
 import tkinter as tk
 from tkinter import messagebox
 
+from data_paths import assert_live_database_path, connection_database_path
 from config import (
     APP_SUBTITLE,
     APP_TITLE,
@@ -190,6 +191,7 @@ def main() -> None:
     """Initialize security controls and start the desktop application."""
     init_db()
     integrity_conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    assert_live_database_path(connection_database_path(integrity_conn), DB_PATH)
     _apply_pragmas(integrity_conn)
     try:
         record_machine_fingerprint(integrity_conn)

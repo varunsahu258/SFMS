@@ -7,6 +7,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 import auth
+from audit import log_financial_action
 from config import SPLASH_BG, SPLASH_FG
 from ledger import active_academic_year, add_adjustment, ensure_student_charges
 from ui_collection_common import connect_db, search_students
@@ -107,6 +108,18 @@ class ExemptionWindow(tk.Toplevel):
             cursor = conn.execute(
                 "INSERT INTO exemptions (student_id, academic_year, fee_head_ids, reason, approved_by, created_at) VALUES (?, ?, ?, ?, ?, ?)",
                 (self.selected_student_id, year, json.dumps(fee_head_ids), self.reason_var.get().strip(), auth.CURRENT_SESSION.user_id, now_str()),
+            )
+            for charge in charges:
+                conn.execute(
+                    "INSERT INTO exemption_charges(exemption_id,charge_id) VALUES (?,?)",
+                    (cursor.lastrowid, charge["charge_id"]),
+                )
+                add_adjustment(conn, charge["charge_id"], "EXEMPTION", float(charge["balance"]), "exemptions", cursor.lastrowid, self.reason_var.get().strip(), auth.CURRENT_SESSION.user_id)
+            log_financial_action(
+                conn, "EXEMPTION_APPLIED", auth.CURRENT_SESSION.user_id,
+                {"table": "exemptions", "record_id": cursor.lastrowid,
+                 "student_id": self.selected_student_id, "academic_year": year,
+                 "fee_head_ids": fee_head_ids, "reason": self.reason_var.get().strip()},
             )
             for charge in charges:
                 conn.execute(

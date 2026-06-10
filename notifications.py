@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 
 from config import BACKUP_INTERVAL_DEFAULT, SETTING_BACKUP_INTERVAL_HOURS
 from ledger import active_academic_year, ensure_student_charges
+from ledger_service import LedgerService
 from utils import today_str
 
 _SQL_DATE = "date(substr({column}, 7, 4) || '-' || substr({column}, 4, 2) || '-' || substr({column}, 1, 2))"
@@ -29,50 +30,46 @@ def _parse_timestamp(value: str | None) -> datetime | None:
     return None
 
 
+def _current_outstanding(conn) -> list[dict]:
+    year = active_academic_year(conn)
+    ensure_student_charges(conn, year)
+    return LedgerService(conn).get_all_outstanding(year)
+
+
+def _due_date(value):
+    try:
+        return datetime.strptime(str(value), "%d-%m-%Y")
+    except (TypeError, ValueError):
+        return None
+
+
 def get_overdue_students(conn, threshold_days=30) -> list[dict]:
-    """Return students with positive charge-ledger balances older than a threshold."""
+    """Return overdue students from the authoritative ledger service."""
     threshold_days = max(0, int(threshold_days))
-    ensure_student_charges(conn, active_academic_year(conn))
-    due_date_sql = _SQL_DATE.format(column="l.due_date")
-    cursor = conn.execute(
-        f"""
-        SELECT s.id AS student_id, s.name, s.class,
-               SUM(l.balance) AS total_balance,
-               strftime('%d-%m-%Y', MIN({due_date_sql})) AS oldest_due_date,
-               CAST(julianday('now','localtime')-julianday(MIN({due_date_sql})) AS INTEGER) AS days_overdue
-        FROM charge_ledger l JOIN students s ON s.id=l.student_id
-        WHERE l.balance>0 AND l.status<>'CANCELLED' AND s.is_active=1
-              AND {due_date_sql} < date('now','localtime', ?)
-        GROUP BY s.id,s.name,s.class
-        ORDER BY days_overdue DESC,total_balance DESC
-        """,
-        (f"-{threshold_days} days",),
-    )
-    rows = _rows_as_dicts(cursor)
-    for row in rows:
-        row["total_balance"] = float(row["total_balance"] or 0)
-        row["days_overdue"] = int(row["days_overdue"] or 0)
-    return rows
+    grouped = {}
+    today = datetime.now()
+    for row in _current_outstanding(conn):
+        due = _due_date(row.get("due_date"))
+        if due is None or (today - due).days < threshold_days:
+            continue
+        item = grouped.setdefault(row["student_id"], {
+            "student_id": row["student_id"], "name": row["student"],
+            "class": row["student_class"], "total_balance": 0.0,
+            "oldest_due_date": row["due_date"], "days_overdue": 0,
+        })
+        item["total_balance"] += float(row["outstanding"])
+        if (today - due).days > item["days_overdue"]:
+            item["days_overdue"] = (today - due).days
+            item["oldest_due_date"] = row["due_date"]
+    return sorted(grouped.values(), key=lambda row: (row["days_overdue"], row["total_balance"]), reverse=True)
 
 
 def get_todays_dues(conn) -> list[dict]:
-    """Return charge-ledger items due today with positive balances."""
-    ensure_student_charges(conn, active_academic_year(conn))
-    cursor = conn.execute(
-        """
-        SELECT s.id AS student_id,s.name,s.class,fh.name AS fee_head,l.balance AS amount
-        FROM charge_ledger l
-        JOIN students s ON s.id=l.student_id
-        JOIN fee_heads fh ON fh.id=l.fee_head_id
-        WHERE s.is_active=1 AND l.status<>'CANCELLED' AND l.due_date=? AND l.balance>0
-        ORDER BY s.class,s.name,fh.name
-        """,
-        (today_str(),),
-    )
-    rows = _rows_as_dicts(cursor)
-    for row in rows:
-        row["amount"] = float(row["amount"] or 0)
-    return rows
+    """Return today's dues from the authoritative ledger service."""
+    return [{"student_id": row["student_id"], "name": row["student"],
+             "class": row["student_class"], "fee_head": row["fee_head"],
+             "amount": float(row["outstanding"])}
+            for row in _current_outstanding(conn) if row.get("due_date") == today_str()]
 
 
 def backup_interval_hours(conn) -> int:
@@ -97,31 +94,18 @@ def backup_overdue(conn) -> bool:
 
 
 def get_notification_state(conn) -> dict:
-    """Return overdue counts, today's charge count, and backup status."""
-    ensure_student_charges(conn, active_academic_year(conn))
-    due_date_sql = _SQL_DATE.format(column="l.due_date")
-    overdue = conn.execute(
-        f"""
-        WITH student_overdue AS (
-            SELECT l.student_id,
-                   CAST(julianday('now','localtime')-julianday(MIN({due_date_sql})) AS INTEGER) AS days_overdue
-            FROM charge_ledger l JOIN students s ON s.id=l.student_id
-            WHERE l.balance>0 AND l.status<>'CANCELLED' AND s.is_active=1
-                  AND {due_date_sql} IS NOT NULL
-            GROUP BY l.student_id
-        )
-        SELECT COALESCE(SUM(days_overdue>=30),0),
-               COALESCE(SUM(days_overdue>=60),0),
-               COALESCE(SUM(days_overdue>=90),0)
-        FROM student_overdue
-        """
-    ).fetchone()
-    today_due_count = conn.execute(
-        "SELECT COUNT(*) FROM charge_ledger l JOIN students s ON s.id=l.student_id WHERE s.is_active=1 AND l.status<>'CANCELLED' AND l.due_date=? AND l.balance>0",
-        (today_str(),),
-    ).fetchone()[0]
+    """Return dashboard counts from one authoritative outstanding snapshot."""
+    rows = _current_outstanding(conn)
+    today = datetime.now()
+    oldest = {}
+    for row in rows:
+        due = _due_date(row.get("due_date"))
+        if due is not None:
+            oldest[row["student_id"]] = max(oldest.get(row["student_id"], 0), (today-due).days)
     return {
-        "overdue_30": int(overdue[0] or 0), "overdue_60": int(overdue[1] or 0),
-        "overdue_90": int(overdue[2] or 0), "today_dues": int(today_due_count or 0),
+        "overdue_30": sum(days >= 30 for days in oldest.values()),
+        "overdue_60": sum(days >= 60 for days in oldest.values()),
+        "overdue_90": sum(days >= 90 for days in oldest.values()),
+        "today_dues": sum(row.get("due_date") == today_str() for row in rows),
         "backup_overdue": backup_overdue(conn),
     }

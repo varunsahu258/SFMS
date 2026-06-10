@@ -11,7 +11,7 @@ from tkinter import messagebox
 
 import bcrypt
 
-from audit import log_action
+from audit import log_operational_event
 from config import DB_PATH, SETTING_SESSION_TIMEOUT_MINUTES, SESSION_TIMEOUT_DEFAULT
 from utils import now_str
 
@@ -119,7 +119,7 @@ def login(username, password) -> tuple[bool, str]:
                 "UPDATE users SET failed_attempts = ?, locked_at = ? WHERE id = ?",
                 (failed_attempts, locked_at, user["id"]),
             )
-            log_action(conn, user["id"], LOGIN_FAIL_ACTION, USERS_TABLE, user["id"])
+            log_operational_event(LOGIN_FAIL_ACTION, user["id"], {"table": USERS_TABLE, "record_id": user["id"]}, conn=conn)
             return False, "Invalid password"
 
         conn.execute(
@@ -135,7 +135,7 @@ def login(username, password) -> tuple[bool, str]:
             login_time=login_time,
             last_active=login_time,
         )
-        log_action(conn, CURRENT_SESSION.user_id, LOGIN_SUCCESS_ACTION, USERS_TABLE, CURRENT_SESSION.user_id)
+        log_operational_event(LOGIN_SUCCESS_ACTION, CURRENT_SESSION.user_id, {"table": USERS_TABLE, "record_id": CURRENT_SESSION.user_id}, conn=conn)
         return True, "OK"
 
 
@@ -144,7 +144,7 @@ def logout() -> None:
     global CURRENT_SESSION
     if CURRENT_SESSION is not None:
         with _connect() as conn:
-            log_action(conn, CURRENT_SESSION.user_id, LOGOUT_ACTION, USERS_TABLE, CURRENT_SESSION.user_id)
+            log_operational_event(LOGOUT_ACTION, CURRENT_SESSION.user_id, {"table": USERS_TABLE, "record_id": CURRENT_SESSION.user_id}, conn=conn)
     CURRENT_SESSION = None
 
 

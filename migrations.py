@@ -29,7 +29,6 @@ def migration_v001_base_settings(conn: sqlite3.Connection) -> None:
         SETTING_BACKUP_INTERVAL_HOURS: str(BACKUP_INTERVAL_DEFAULT),
         "ui_language": "en",
         "backup_encryption_enabled": "0",
-        "master_backup_password_hash": "",
         "gdrive_token_json": "",
     }
     for key, value in defaults.items():
@@ -196,12 +195,38 @@ def migration_v005_immutability_controls(conn: sqlite3.Connection) -> None:
     )
 
 
+def migration_v006_advance_and_backup_keys(conn: sqlite3.Connection) -> None:
+    """Persist payment intent/term and initialize envelope-encryption settings."""
+    payment_columns = {row[1] for row in conn.execute("PRAGMA table_info(payments)")}
+    if "payment_intent" not in payment_columns:
+        conn.execute(
+            "ALTER TABLE payments ADD COLUMN payment_intent TEXT NOT NULL DEFAULT 'REGULAR' "
+            "CHECK(payment_intent IN ('REGULAR','ADVANCE','VOID'))"
+        )
+    if "allocated_academic_year_id" not in payment_columns:
+        conn.execute(
+            "ALTER TABLE payments ADD COLUMN allocated_academic_year_id INTEGER "
+            "REFERENCES academic_years(id)"
+        )
+    if "allocated_term" not in payment_columns:
+        conn.execute("ALTER TABLE payments ADD COLUMN allocated_term TEXT")
+    for key, value in (
+        ("backup_encryption_enabled", "1"),
+        ("backup_kdf_salt", ""),
+        ("backup_wrapped_dek", ""),
+        ("backup_wrap_nonce", ""),
+    ):
+        conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (key, value))
+    conn.execute("UPDATE settings SET value='1' WHERE key='backup_encryption_enabled'")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     ("v001_base_settings", migration_v001_base_settings),
     ("v002_setup_defaults", migration_v002_setup_defaults),
     ("v003_receipt_hmac", migration_v003_receipt_hmac),
     ("v004_receipt_print_tracking", migration_v004_receipt_print_tracking),
     ("v005_immutability_controls", migration_v005_immutability_controls),
+    ("v006_advance_and_backup_keys", migration_v006_advance_and_backup_keys),
 )
 
 

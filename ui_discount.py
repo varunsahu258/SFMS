@@ -6,6 +6,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 import auth
+from audit import log_financial_action
 from config import SPLASH_BG, SPLASH_FG
 from ledger import active_academic_year, add_adjustment, ensure_student_charges
 from money import OverpaymentError, max_payment_amount, validate_payment_amount
@@ -117,6 +118,13 @@ class DiscountWindow(tk.Toplevel):
             cursor = conn.execute(
                 "INSERT INTO discounts (student_id, fee_head_id, amount, reason, approved_by, created_at, academic_year, charge_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (self.selected_student_id, fee_head_id, str(amount), self.reason_var.get().strip(), auth.CURRENT_SESSION.user_id, now_str(), year, charge["charge_id"]),
+            )
+            add_adjustment(conn, charge["charge_id"], "DISCOUNT", str(amount), "discounts", cursor.lastrowid, self.reason_var.get().strip(), auth.CURRENT_SESSION.user_id)
+            log_financial_action(
+                conn, "DISCOUNT_APPLIED", auth.CURRENT_SESSION.user_id,
+                {"table": "discounts", "record_id": cursor.lastrowid,
+                 "student_id": self.selected_student_id, "charge_id": charge["charge_id"],
+                 "amount": str(amount), "reason": self.reason_var.get().strip()},
             )
             add_adjustment(conn, charge["charge_id"], "DISCOUNT", str(amount), "discounts", cursor.lastrowid, self.reason_var.get().strip(), auth.CURRENT_SESSION.user_id)
         messagebox.showinfo("Discount", "Discount saved.")

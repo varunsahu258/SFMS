@@ -8,7 +8,6 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-import bcrypt
 from openpyxl import Workbook
 from PIL import Image, ImageTk
 
@@ -186,18 +185,32 @@ class SettingsWindow(tk.Toplevel):
             messagebox.showinfo("Machine Fingerprint", "Fingerprint cleared. It will be recorded at next startup.", parent=self)
 
     def set_backup_password(self) -> None:
-        password = simpledialog.askstring("Backup Password", "New master password (minimum 8 characters):", show="*", parent=self)
-        if not password or len(password) < 8:
-            messagebox.showerror("Backup Password", "Password must be at least 8 characters.", parent=self)
+        with _connect() as conn:
+            has_key = bool(conn.execute(
+                "SELECT 1 FROM settings WHERE key='backup_wrapped_dek' AND value<>''"
+            ).fetchone())
+        old_password = simpledialog.askstring("Backup Password", "Current password:", show="*", parent=self) if has_key else None
+        if has_key and old_password is None:
             return
+        password = simpledialog.askstring("Backup Password", "New password (minimum 8 characters):", show="*", parent=self)
         confirm = simpledialog.askstring("Backup Password", "Confirm password:", show="*", parent=self)
         if password != confirm:
             messagebox.showerror("Backup Password", "Passwords do not match.", parent=self)
             return
-        hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-        with _connect() as conn:
-            _upsert(conn, "master_backup_password_hash", hashed)
-        messagebox.showinfo("Backup Password", "Master backup password saved.", parent=self)
+        if not password or len(password) < 8:
+            messagebox.showerror("Backup Password", "Password must be at least 8 characters.", parent=self)
+            return
+        try:
+            with _connect() as conn:
+                if has_key:
+                    backup.rotate_backup_password(conn, old_password, password or "")
+                else:
+                    backup.setup_backup_password(conn, password or "")
+        except ValueError as exc:
+            messagebox.showerror("Backup Password", str(exc), parent=self)
+            return
+        self.encryption.set(True)
+        messagebox.showinfo("Backup Password", "Backup password saved.", parent=self)
 
     def export_database(self) -> None:
         auth.touch_session()
@@ -223,17 +236,12 @@ class SettingsWindow(tk.Toplevel):
         if not self.school_name.get().strip():
             messagebox.showerror("Settings", "School name is required.", parent=self)
             return
-        if self.encryption.get():
-            with _connect() as conn:
-                has_password = conn.execute("SELECT 1 FROM settings WHERE key='master_backup_password_hash' AND value<>''").fetchone()
-            if not has_password:
-                messagebox.showerror("Settings", "Set the master backup password before enabling encryption.", parent=self)
-                return
+        self.encryption.set(True)
         values = {
             "school_name": self.school_name.get().strip(), "school_address": self.school_address.get().strip(),
             "logo_path": self.logo_path.get().strip(), "ui_theme": self.theme.get(), "ui_language": self.language.get(),
             "session_timeout_minutes": str(self.timeout.get()), "backup_interval_hours": self.backup_interval.get(),
-            "backup_encryption_enabled": "1" if self.encryption.get() else "0",
+            "backup_encryption_enabled": "1",
         }
         with _connect() as conn:
             for key, value in values.items():

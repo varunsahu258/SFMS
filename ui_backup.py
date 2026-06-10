@@ -8,7 +8,6 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-import bcrypt
 
 import auth
 import backup
@@ -97,7 +96,7 @@ class BackupWindow(tk.Toplevel):
         ttk.Button(frame, text="Set Master Password", command=self.set_master_password).pack(anchor="w", pady=6)
         tk.Label(
             frame,
-            text="The master password is stored only as a bcrypt hash. Losing it makes encrypted backups unrecoverable.",
+            text="The password wraps a random encryption key and is never stored. Losing it makes backups unrecoverable.",
             bg=SPLASH_BG,
             fg=SPLASH_FG,
             wraplength=720,
@@ -151,28 +150,33 @@ class BackupWindow(tk.Toplevel):
         ttk.Combobox(frame, textvariable=self.archive_year_var, values=self.years, state="readonly", width=20).grid(row=1, column=1, padx=8)
         ttk.Button(frame, text="Archive Year", command=self.archive_selected_year).grid(row=1, column=2, padx=8)
 
-    def _master_hash(self) -> str:
+    def _has_backup_key(self) -> bool:
         with _connect() as conn:
-            row = conn.execute("SELECT value FROM settings WHERE key = 'master_backup_password_hash'").fetchone()
-        return str(row[0] or "") if row else ""
+            return bool(conn.execute(
+                "SELECT 1 FROM settings WHERE key='backup_wrapped_dek' AND value<>''"
+            ).fetchone())
 
     def _password_material(self) -> str | None:
-        """Prompt for the master password, verify bcrypt, and return stored hash material."""
-        stored_hash = self._master_hash()
-        if not stored_hash:
+        """Prompt for and verify the real owner password by unwrapping the DEK."""
+        if not self._has_backup_key():
             messagebox.showerror("Backup Password", "Set the master backup password first.", parent=self)
             return None
         password = simpledialog.askstring("Master Backup Password", "Enter master password:", show="*", parent=self)
         if password is None:
             return None
-        if not bcrypt.checkpw(password.encode("utf-8"), stored_hash.encode("utf-8")):
-            messagebox.showerror("Backup Password", "Wrong password.", parent=self)
+        try:
+            with _connect() as conn:
+                backup.unlock_backup_key(conn, password)
+        except ValueError as exc:
+            messagebox.showerror("Backup Password", str(exc), parent=self)
             return None
-        return stored_hash
+        return password
 
     def create_backup(self) -> None:
-        """Create a manual plain or encrypted backup and refresh history."""
+        """Unlock the DEK, create an encrypted backup, and refresh history."""
         auth.touch_session()
+        if self._password_material() is None:
+            return
         try:
             with _connect() as conn:
                 path = backup.manual_backup(conn, auth.CURRENT_SESSION.user_id)
@@ -183,30 +187,37 @@ class BackupWindow(tk.Toplevel):
         messagebox.showinfo("Backup", f"Backup created:\n{path}", parent=self)
 
     def save_encryption_setting(self) -> None:
-        """Persist the optional encryption toggle, requiring a configured password."""
-        if self.encryption_var.get() and not self._master_hash():
-            self.encryption_var.set(False)
-            messagebox.showerror("Backup Encryption", "Set the master password before enabling encryption.", parent=self)
-            return
+        """Backups are always encrypted; disabling encryption is forbidden."""
+        self.encryption_var.set(True)
         with _connect() as conn:
-            _set_setting(conn, "backup_encryption_enabled", "1" if self.encryption_var.get() else "0")
+            _set_setting(conn, "backup_encryption_enabled", "1")
+        messagebox.showinfo("Backup Encryption", "Backups are always encrypted.", parent=self)
 
     def set_master_password(self) -> None:
-        """Hash and store a confirmed master backup password."""
-        password = simpledialog.askstring("Master Backup Password", "New master password:", show="*", parent=self)
-        if password is None:
-            return
-        if len(password) < 8:
-            messagebox.showerror("Backup Password", "Password must be at least 8 characters.", parent=self)
-            return
-        confirm = simpledialog.askstring("Master Backup Password", "Confirm master password:", show="*", parent=self)
+        """Create or rotate the envelope-encryption password."""
+        old_password = None
+        if self._has_backup_key():
+            old_password = simpledialog.askstring("Backup Password", "Current password:", show="*", parent=self)
+            if old_password is None:
+                return
+        password = simpledialog.askstring("Backup Password", "New password (minimum 8 characters):", show="*", parent=self)
+        confirm = simpledialog.askstring("Backup Password", "Confirm new password:", show="*", parent=self)
         if password != confirm:
             messagebox.showerror("Backup Password", "Passwords do not match.", parent=self)
             return
-        password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-        with _connect() as conn:
-            _set_setting(conn, "master_backup_password_hash", password_hash)
-        messagebox.showinfo("Backup Password", "Master backup password saved.", parent=self)
+        if not password or len(password) < 8:
+            messagebox.showerror("Backup Password", "Password must be at least 8 characters.", parent=self)
+            return
+        try:
+            with _connect() as conn:
+                if old_password is None:
+                    backup.setup_backup_password(conn, password or "")
+                else:
+                    backup.rotate_backup_password(conn, old_password, password or "")
+        except ValueError as exc:
+            messagebox.showerror("Backup Password", str(exc), parent=self)
+            return
+        messagebox.showinfo("Backup Password", "Backup password saved; existing backups remain readable.", parent=self)
 
     def save_schedule(self) -> None:
         with _connect() as conn:

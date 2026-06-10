@@ -2,18 +2,16 @@
 
 from __future__ import annotations
 
-import json
 import tkinter as tk
 from tkinter import messagebox, ttk
 
 import auth
-from audit import log_action
 from config import SPLASH_BG, SPLASH_FG
-from ledger import active_academic_year, allocate_payment, ensure_student_charges
+from ledger import active_academic_year, ensure_student_charges
 from money import OverpaymentError, max_payment_amount, validate_payment_amount
-from receipt_integrity import sign_receipt
+from receipt_printing import PrintFailureDialog, print_committed_receipt
 from ui_collection_common import connect_db, require_session, search_students
-from utils import generate_receipt_no, now_str, today_str
+from financial_operations import record_advance_payment
 
 
 class AdvancePaymentWindow(tk.Toplevel):
@@ -79,8 +77,10 @@ class AdvancePaymentWindow(tk.Toplevel):
             ensure_student_charges(conn, year, self.selected_student_id)
             rows = conn.execute(
                 """
-                SELECT l.charge_id, l.fee_head_id, fh.name, l.due_date, l.balance
-                FROM charge_ledger l JOIN fee_heads fh ON fh.id=l.fee_head_id
+                SELECT l.charge_id, l.fee_head_id, fh.name, l.due_date, l.balance,
+                       ay.id AS academic_year_id, ay.label AS academic_year
+                FROM charge_ledger l
+                JOIN academic_years ay ON ay.label=l.academic_year JOIN fee_heads fh ON fh.id=l.fee_head_id
                 WHERE l.student_id=? AND l.academic_year=? AND l.due_date IS NOT NULL
                       AND l.due_date<>'' AND l.balance>0
                 ORDER BY l.due_date, fh.name
@@ -97,7 +97,7 @@ class AdvancePaymentWindow(tk.Toplevel):
             self.term_var.set(rows[0]["due_date"])
 
     def save(self) -> None:
-        """Insert an immutable advance payment with negative balance credit."""
+        """Insert an immutable, term-scoped advance payment and print its receipt."""
         auth.touch_session()
         if self.selected_student_id is None or not require_session():
             return
@@ -122,34 +122,19 @@ class AdvancePaymentWindow(tk.Toplevel):
             except ValueError as exc:
                 messagebox.showerror("Validation", str(exc), parent=self)
                 return
-            receipt_no = generate_receipt_no(conn)
-            payment_date = today_str()
-            payment_hash = ""
-            cursor = conn.execute(
-                """
-                INSERT INTO payments (
-                    student_id, receipt_no, fee_head_id, amount_due, amount_paid, balance,
-                    payment_date, collected_by, payment_mode, note, hash
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'CASH', 'ADVANCE', ?)
-                """,
-                (self.selected_student_id, receipt_no, fee_head_id, 0, str(amount), 0, payment_date, auth.CURRENT_SESSION.user_id, payment_hash),
-            )
-            allocate_payment(conn, cursor.lastrowid, charge_id, str(amount), "ADVANCE")
-            receipt_cursor = conn.execute(
-                """
-                INSERT INTO receipts (receipt_no, student_id, total_paid, receipt_type, printed_at, printed_by, reprint_count)
-                VALUES (?, ?, ?, 'ADVANCE', ?, ?, 0)
-                """,
-                (receipt_no, self.selected_student_id, str(amount), now_str(), auth.CURRENT_SESSION.user_id),
-            )
-            sign_receipt(conn, receipt_cursor.lastrowid)
-            log_action(
-                conn,
-                auth.CURRENT_SESSION.user_id,
-                "ADVANCE_PAYMENT",
-                "payments",
-                cursor.lastrowid,
-                None,
-                json.dumps({"receipt_no": receipt_no, "amount": amount}, default=str),
-            )
+            try:
+                result = record_advance_payment(
+                    conn, self.selected_student_id, charge_id, fee_head_id, amount,
+                    option["academic_year_id"], option["academic_year"],
+                    str(option["due_date"]), auth.CURRENT_SESSION.user_id,
+                )
+            except Exception as exc:
+                messagebox.showerror("Advance payment", str(exc), parent=self)
+                return
+            receipt_no = result["receipt_no"]
+            committed_receipt_id = result["receipt_id"]
+        try:
+            print_committed_receipt(committed_receipt_id, receipt_no)
+        except Exception as exc:
+            PrintFailureDialog(self, committed_receipt_id, receipt_no, exc)
         messagebox.showinfo("Advance payment", f"Advance payment saved. Receipt No: {receipt_no}")
