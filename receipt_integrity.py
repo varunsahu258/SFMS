@@ -144,6 +144,37 @@ def integrity_key(conn: sqlite3.Connection | None = None, *, bind: bool = True) 
     return key
 
 
+def _load_or_create_integrity_key_file(path: Path) -> str:
+    """Return the persistent key, creating it atomically on first launch."""
+    path = path.expanduser().resolve()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        encoded = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii")
+        with path.open("x", encoding="ascii") as handle:
+            handle.write(encoded + "\n")
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+        return encoded
+    except FileExistsError:
+        try:
+            return path.read_text(encoding="ascii").strip()
+        except OSError as exc:
+            raise RuntimeError(f"Unable to read the SFMS integrity key file: {path}") from exc
+    except OSError as exc:
+        raise RuntimeError(f"Unable to create the SFMS integrity key file: {path}") from exc
+
+
+def integrity_key() -> bytes:
+    """Load the deployment override or a persistent key created on first launch."""
+    value = os.environ.get(ENV_KEY, "").strip()
+    if value:
+        return _decode_integrity_key(value, ENV_KEY)
+    value = _load_or_create_integrity_key_file(Path(INTEGRITY_KEY_PATH))
+    return _decode_integrity_key(value, str(INTEGRITY_KEY_PATH))
+
+
 def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in conn.execute(f'PRAGMA table_info("{table}")')}
 
