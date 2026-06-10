@@ -84,7 +84,7 @@ class DuesWindow(tk.Toplevel):
         if self.overdue_threshold is not None:
             rows = [row for row in rows if days_overdue(row["due_date"]) >= self.overdue_threshold]
         for row in rows:
-            days = days_overdue(row["due_date"])
+            days = days_overdue(row["oldest_payment_date"] or row["due_date"])
             values = (
                 row["student"], row["fee_head"], format_currency(row["amount_due"] or 0),
                 format_currency(row["paid"] or 0), format_currency(row["outstanding"] or 0), row["due_date"] or "", days,

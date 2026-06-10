@@ -318,6 +318,9 @@ class CollectionBaseWindow(tk.Toplevel):
             if item["mode"] == "UPI" and not item.get("note"):
                 messagebox.showerror("UPI details", f"UPI transaction reference is required for {item['name']}.")
                 return False
+            if item["amount_paying"] > float(item["amount_due"]) + 0.005:
+                messagebox.showerror("Collection", f"Payment for {item['name']} cannot exceed its charge balance. Use Advance Payment for future fees.")
+                return False
         return True
 
     def confirm_and_save(self) -> None:

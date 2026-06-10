@@ -121,4 +121,10 @@ class ExemptionWindow(tk.Toplevel):
                  "student_id": self.selected_student_id, "academic_year": year,
                  "fee_head_ids": fee_head_ids, "reason": self.reason_var.get().strip()},
             )
+            for charge in charges:
+                conn.execute(
+                    "INSERT INTO exemption_charges(exemption_id,charge_id) VALUES (?,?)",
+                    (cursor.lastrowid, charge["charge_id"]),
+                )
+                add_adjustment(conn, charge["charge_id"], "EXEMPTION", float(charge["balance"]), "exemptions", cursor.lastrowid, self.reason_var.get().strip(), auth.CURRENT_SESSION.user_id)
         messagebox.showinfo("Exemption", "Exemption saved.")
