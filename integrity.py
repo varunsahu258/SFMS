@@ -15,7 +15,7 @@ from tkinter import messagebox
 
 import bcrypt
 
-from receipt_integrity import integrity_key
+from receipt_integrity import integrity_key_for_database
 from security_utils import MACHINE_AUTHORIZATION_REQUIRED_MESSAGE
 from utils import now_str
 
@@ -187,7 +187,7 @@ def machine_fingerprint(conn: sqlite3.Connection | None = None) -> str:
             str(platform.processor() or ""),
         )
     ).encode("utf-8")
-    return hmac.new(integrity_key(conn, bind=False), payload, hashlib.sha256).hexdigest()
+    return hmac.new(integrity_key_for_database(conn, bind=False), payload, hashlib.sha256).hexdigest()
 
 
 def _setting(conn: sqlite3.Connection, key: str) -> str:
@@ -216,13 +216,13 @@ def record_machine_fingerprint(conn):
     fingerprint = machine_fingerprint(conn)
     existing = _setting(conn, MACHINE_ID_SETTING)
     if not existing:
-        integrity_key(conn)
+        integrity_key_for_database(conn)
         _upsert_setting(conn, MACHINE_ID_SETTING, fingerprint)
         _upsert_setting(conn, MACHINE_PENDING_SETTING, "")
         conn.commit()
         return True
     if hmac.compare_digest(existing, fingerprint):
-        integrity_key(conn)
+        integrity_key_for_database(conn)
         _upsert_setting(conn, MACHINE_PENDING_SETTING, "")
         conn.commit()
         return True
@@ -250,7 +250,7 @@ def authorize_new_machine(conn: sqlite3.Connection, username: str, password: str
     user_id = row[0] if not hasattr(row, "keys") else row["id"]
     old = _setting(conn, MACHINE_ID_SETTING)
     new = _setting(conn, MACHINE_PENDING_SETTING) or machine_fingerprint(conn)
-    integrity_key(conn)
+    integrity_key_for_database(conn)
     _upsert_setting(conn, MACHINE_ID_SETTING, new)
     _upsert_setting(conn, MACHINE_PENDING_SETTING, "")
     conn.execute(

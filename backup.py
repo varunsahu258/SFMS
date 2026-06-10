@@ -208,9 +208,11 @@ def encrypt_backup(filepath, password=None, *, conn=None) -> str:
         dek = _unwrap_dek(connection, password) if password is not None else _UNLOCKED_DEK
         if dek is None:
             raise ValueError("Backup key is locked. Enter the master backup password.")
-        from receipt_integrity import integrity_key
+        from receipt_integrity import integrity_key_for_database
 
-        recovery_payload = _recovery_payload(source.read_bytes(), integrity_key(connection))
+        recovery_payload = _recovery_payload(
+            source.read_bytes(), integrity_key_for_database(connection)
+        )
         salt = _decode_setting(connection, KDF_SALT_SETTING)
         wrap_nonce = _decode_setting(connection, WRAP_NONCE_SETTING)
         wrapped_dek = _decode_setting(connection, WRAPPED_DEK_SETTING)

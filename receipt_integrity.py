@@ -126,53 +126,39 @@ def _validate_database_key(conn: sqlite3.Connection, key: bytes, *, bind: bool) 
         )
 
 
-def integrity_key(conn: sqlite3.Connection | None = None, *, bind: bool = True) -> bytes:
-    """Load and validate the deployment key, refusing silent key replacement."""
-    value = os.environ.get(ENV_KEY, "").strip()
-    if value:
-        key = _decode_integrity_key(value, ENV_KEY)
-    else:
-        path = Path(INTEGRITY_KEY_PATH)
-        value = _read_integrity_key_file(path)
-        if value is None:
-            if conn is not None and (_database_key_id(conn) or _database_has_integrity_state(conn)):
-                raise IntegrityKeyError(KEY_RECOVERY_MESSAGE)
-            value = _create_integrity_key_file(path)
-        key = _decode_integrity_key(value, str(path))
-    if conn is not None:
-        _validate_database_key(conn, key, bind=bind)
-    return key
-
-
-def _load_or_create_integrity_key_file(path: Path) -> str:
-    """Return the persistent key, creating it atomically on first launch."""
-    path = path.expanduser().resolve()
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        encoded = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii")
-        with path.open("x", encoding="ascii") as handle:
-            handle.write(encoded + "\n")
-        try:
-            path.chmod(0o600)
-        except OSError:
-            pass
-        return encoded
-    except FileExistsError:
-        try:
-            return path.read_text(encoding="ascii").strip()
-        except OSError as exc:
-            raise RuntimeError(f"Unable to read the SFMS integrity key file: {path}") from exc
-    except OSError as exc:
-        raise RuntimeError(f"Unable to create the SFMS integrity key file: {path}") from exc
-
-
-def integrity_key() -> bytes:
-    """Load the deployment override or a persistent key created on first launch."""
+def _load_integrity_key() -> bytes:
+    """Load or create the deployment key without changing database binding state."""
     value = os.environ.get(ENV_KEY, "").strip()
     if value:
         return _decode_integrity_key(value, ENV_KEY)
-    value = _load_or_create_integrity_key_file(Path(INTEGRITY_KEY_PATH))
-    return _decode_integrity_key(value, str(INTEGRITY_KEY_PATH))
+    path = Path(INTEGRITY_KEY_PATH)
+    value = _read_integrity_key_file(path)
+    if value is None:
+        value = _create_integrity_key_file(path)
+    return _decode_integrity_key(value, str(path))
+
+
+def integrity_key_for_database(
+    conn: sqlite3.Connection, *, bind: bool = True
+) -> bytes:
+    """Load the key and validate it against a specific SFMS database."""
+    value = os.environ.get(ENV_KEY, "").strip()
+    path = Path(INTEGRITY_KEY_PATH)
+    if not value and _read_integrity_key_file(path) is None:
+        if _database_key_id(conn) or _database_has_integrity_state(conn):
+            raise IntegrityKeyError(KEY_RECOVERY_MESSAGE)
+    key = _load_integrity_key()
+    _validate_database_key(conn, key, bind=bind)
+    return key
+
+
+def integrity_key(
+    conn: sqlite3.Connection | None = None, *, bind: bool = True
+) -> bytes:
+    """Compatibility API for key loading, optionally validated against a database."""
+    if conn is None:
+        return _load_integrity_key()
+    return integrity_key_for_database(conn, bind=bind)
 
 
 def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -286,7 +272,7 @@ def compute_receipt_hmac(fields: dict, key: bytes | None = None) -> str:
 def sign_receipt(conn: sqlite3.Connection, receipt_id: int) -> str:
     """Insert one immutable HMAC record for a newly completed receipt."""
     fields = signed_receipt_fields(conn, receipt_id)
-    value = compute_receipt_hmac(fields, integrity_key(conn))
+    value = compute_receipt_hmac(fields, integrity_key_for_database(conn))
     conn.execute(
         """INSERT INTO receipt_hashes(
                receipt_id,receipt_no,hmac_value,signed_fields_json,signed_at,algorithm

@@ -154,3 +154,32 @@ def test_wrong_integrity_key_is_rejected_for_bound_database(tmp_path, monkeypatc
 
     with pytest.raises(RuntimeError, match="does not match this database"):
         receipt_integrity.integrity_key(conn)
+
+
+def test_integrity_key_public_api_accepts_database_and_bind_keyword():
+    """Prevent packaged callers and the key loader from drifting out of sync again."""
+    import inspect
+    import receipt_integrity
+
+    signature = inspect.signature(receipt_integrity.integrity_key)
+    assert "conn" in signature.parameters
+    assert "bind" in signature.parameters
+    assert signature.parameters["bind"].kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def test_database_key_api_supports_non_binding_machine_fingerprint(monkeypatch):
+    import base64
+    import receipt_integrity
+
+    expected = b"m" * 32
+    monkeypatch.setenv(
+        receipt_integrity.ENV_KEY,
+        base64.urlsafe_b64encode(expected).decode("ascii"),
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT)")
+
+    assert receipt_integrity.integrity_key_for_database(conn, bind=False) == expected
+    assert conn.execute(
+        "SELECT value FROM settings WHERE key=?", (receipt_integrity.KEY_ID_SETTING,)
+    ).fetchone() is None
