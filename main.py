@@ -21,6 +21,7 @@ from config import (
 from database import init_db
 from app_events import BACKUP_WARNING, SESSION_TIMEOUT, ui_event_queue
 from integrity import MachineAuthorizationRequired, record_machine_fingerprint, startup_integrity_check
+from receipt_integrity import IntegrityKeyError
 
 _MONITORS_STARTED = False
 
@@ -287,6 +288,13 @@ def main() -> None:
 
         MachineAuthorizationWindow(on_complete=show_splash)
         tk.mainloop()
+        return
+    except IntegrityKeyError as exc:
+        integrity_conn.close()
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror("SFMS integrity key recovery required", str(exc), parent=root)
+        root.destroy()
         return
     except Exception:
         integrity_conn.close()

@@ -17,7 +17,7 @@ from utils import now_str
 class ExemptionWindow(tk.Toplevel):
     """Admin-only window for recording fee-head exemptions."""
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("manage_exemptions")
     def __init__(self, master=None):
         """Create the exemption window."""
         super().__init__(master)
@@ -84,7 +84,7 @@ class ExemptionWindow(tk.Toplevel):
         selection = self.student_tree.selection()
         self.selected_student_id = int(selection[0]) if selection else None
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("manage_exemptions")
     def save(self) -> None:
         """Insert an exemption record with fee_head_ids stored as a JSON array."""
         if self.selected_student_id is None:

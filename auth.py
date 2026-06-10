@@ -15,6 +15,7 @@ import bcrypt
 
 from audit import log_operational_event
 from config import DB_PATH, SETTING_SESSION_TIMEOUT_MINUTES, SESSION_TIMEOUT_DEFAULT
+from permissions import DEFAULT_ACCOUNTANT_PERMISSIONS, PERMISSION_KEYS
 from security_utils import GENERIC_LOGIN_FAILURE_MESSAGE, MACHINE_AUTHORIZATION_REQUIRED_MESSAGE
 from utils import now_str
 
@@ -197,6 +198,55 @@ def require_role(*roles):
 def current_user_can_write() -> bool:
     """Return True when an authenticated session exists before a database write."""
     return CURRENT_SESSION is not None and CURRENT_SESSION.token is not None
+
+
+def has_permission(permission_key: str) -> bool:
+    """Return whether the current authenticated user has a capability."""
+    if permission_key not in PERMISSION_KEYS:
+        return False
+    session = CURRENT_SESSION
+    if session is None or session.token is None:
+        return False
+    if session.role == "ADMIN":
+        return True
+    if session.role != "ACCOUNTANT":
+        return False
+    user_id = session.user_id
+    try:
+        with _connect() as conn:
+            row = conn.execute(
+                "SELECT allowed FROM user_permissions WHERE user_id=? AND permission_key=?",
+                (user_id, permission_key),
+            ).fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    if row is not None:
+        return bool(row["allowed"])
+    return permission_key in DEFAULT_ACCOUNTANT_PERMISSIONS
+
+
+def require_permission(permission_key: str):
+    """Decorate a UI action so ADMIN or an explicitly permitted accountant may run it."""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            if not has_permission(permission_key):
+                messagebox.showerror("Access denied", "You do not have permission to perform this action.")
+                return None
+            CURRENT_SESSION.touch()
+            return func(*args, **kwargs)
+        return wrapper
+    return decorator
+
+
+def can_manage_non_financial_data() -> bool:
+    """Return True for roles allowed to maintain students, classes, and school documents."""
+    return current_user_can_write() and (CURRENT_SESSION.role == "ADMIN" or has_permission("manage_students"))
+
+
+def can_override_financial_data() -> bool:
+    """Return True only for administrators allowed to alter financial outcomes."""
+    return current_user_can_write() and CURRENT_SESSION.role == "ADMIN"
 
 
 def touch_session() -> None:

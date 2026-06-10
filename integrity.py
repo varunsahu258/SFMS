@@ -177,7 +177,7 @@ def _sanitize_hostname(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "_", str(value or "").strip().lower())[:128]
 
 
-def machine_fingerprint() -> str:
+def machine_fingerprint(conn: sqlite3.Connection | None = None) -> str:
     """Return an HMAC-SHA256 fingerprint over machine attributes."""
     payload = "|".join(
         (
@@ -187,7 +187,7 @@ def machine_fingerprint() -> str:
             str(platform.processor() or ""),
         )
     ).encode("utf-8")
-    return hmac.new(integrity_key(), payload, hashlib.sha256).hexdigest()
+    return hmac.new(integrity_key(conn, bind=False), payload, hashlib.sha256).hexdigest()
 
 
 def _setting(conn: sqlite3.Connection, key: str) -> str:
@@ -207,20 +207,22 @@ def machine_authorization_required(conn: sqlite3.Connection) -> bool:
     stored = _setting(conn, MACHINE_ID_SETTING)
     if not stored:
         return False
-    current = machine_fingerprint()
+    current = machine_fingerprint(conn)
     return not hmac.compare_digest(stored, current)
 
 
 def record_machine_fingerprint(conn):
     """Store first machine identity or block when the fingerprint changes."""
-    fingerprint = machine_fingerprint()
+    fingerprint = machine_fingerprint(conn)
     existing = _setting(conn, MACHINE_ID_SETTING)
     if not existing:
+        integrity_key(conn)
         _upsert_setting(conn, MACHINE_ID_SETTING, fingerprint)
         _upsert_setting(conn, MACHINE_PENDING_SETTING, "")
         conn.commit()
         return True
     if hmac.compare_digest(existing, fingerprint):
+        integrity_key(conn)
         _upsert_setting(conn, MACHINE_PENDING_SETTING, "")
         conn.commit()
         return True
@@ -247,7 +249,8 @@ def authorize_new_machine(conn: sqlite3.Connection, username: str, password: str
         return False
     user_id = row[0] if not hasattr(row, "keys") else row["id"]
     old = _setting(conn, MACHINE_ID_SETTING)
-    new = _setting(conn, MACHINE_PENDING_SETTING) or machine_fingerprint()
+    new = _setting(conn, MACHINE_PENDING_SETTING) or machine_fingerprint(conn)
+    integrity_key(conn)
     _upsert_setting(conn, MACHINE_ID_SETTING, new)
     _upsert_setting(conn, MACHINE_PENDING_SETTING, "")
     conn.execute(

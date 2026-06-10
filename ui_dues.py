@@ -18,6 +18,7 @@ from utils import format_currency, today_str
 class DuesWindow(tk.Toplevel):
     """Display student-wise or class-wide unpaid dues."""
 
+    @auth.require_permission("view_dues")
     def __init__(self, master=None, overdue_threshold: int | None = None):
         """Create the dues window with an optional overdue-days filter."""
         super().__init__(master)
@@ -102,12 +103,19 @@ class DuesWindow(tk.Toplevel):
             return None
         return self.row_students.get(selected[0])
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("manage_students")
     def issue_tc(self) -> None:
         """Issue or override a transfer certificate from the selected dues row."""
         auth.touch_session()
         row = self._selected_student()
         if row is None:
+            return
+        if not auth.can_override_financial_data():
+            messagebox.showerror(
+                "Transfer Certificate",
+                "This student has unpaid dues. Only an administrator can override dues clearance.",
+                parent=self,
+            )
             return
         from ui_students import DuesClearanceDialog
 

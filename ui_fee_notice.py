@@ -24,7 +24,7 @@ def _connect() -> sqlite3.Connection:
 class FeeNoticeWindow(tk.Toplevel):
     """Generate one-page-per-student fee notices for a selected class."""
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("issue_fee_notices")
     def __init__(self, master=None):
         """Create the class selector and generation action."""
         super().__init__(master)

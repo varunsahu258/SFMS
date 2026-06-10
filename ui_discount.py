@@ -17,7 +17,7 @@ from utils import now_str
 class DiscountWindow(tk.Toplevel):
     """Admin-only window for creating student fee discounts."""
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("manage_discounts")
     def __init__(self, master=None):
         """Create the discount window."""
         super().__init__(master)
@@ -76,7 +76,7 @@ class DiscountWindow(tk.Toplevel):
         selection = self.tree.selection()
         self.selected_student_id = int(selection[0]) if selection else None
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("manage_discounts")
     def save(self) -> None:
         """Insert a discount row; trigger handles audit logging."""
         if self.selected_student_id is None:

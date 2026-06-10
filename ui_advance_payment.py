@@ -17,6 +17,7 @@ from financial_operations import record_advance_payment
 class AdvancePaymentWindow(tk.Toplevel):
     """Collect advance payment as an immutable credit payment row."""
 
+    @auth.require_permission("collect_advance_payments")
     def __init__(self, master=None):
         """Create the advance-payment window."""
         super().__init__(master)
