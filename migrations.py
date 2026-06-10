@@ -29,7 +29,6 @@ def migration_v001_base_settings(conn: sqlite3.Connection) -> None:
         SETTING_BACKUP_INTERVAL_HOURS: str(BACKUP_INTERVAL_DEFAULT),
         "ui_language": "en",
         "backup_encryption_enabled": "0",
-        "gdrive_token_json": "",
     }
     for key, value in defaults.items():
         _setting(conn, key, value)
@@ -220,6 +219,19 @@ def migration_v006_advance_and_backup_keys(conn: sqlite3.Connection) -> None:
     conn.execute("UPDATE settings SET value='1' WHERE key='backup_encryption_enabled'")
 
 
+def migration_v007_remove_oauth_token_setting(conn: sqlite3.Connection) -> None:
+    """Remove plaintext Google OAuth token material from SQLite settings."""
+    conn.execute("DROP TRIGGER IF EXISTS trg_settings_no_delete")
+    conn.execute("DELETE FROM settings WHERE key IN ('gdrive_token_json','oauth_token')")
+    conn.executescript(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_settings_no_delete BEFORE DELETE ON settings BEGIN
+            SELECT RAISE(ABORT,'settings: deletion not permitted');
+        END;
+        """
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     ("v001_base_settings", migration_v001_base_settings),
     ("v002_setup_defaults", migration_v002_setup_defaults),
@@ -227,6 +239,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     ("v004_receipt_print_tracking", migration_v004_receipt_print_tracking),
     ("v005_immutability_controls", migration_v005_immutability_controls),
     ("v006_advance_and_backup_keys", migration_v006_advance_and_backup_keys),
+    ("v007_remove_oauth_token_setting", migration_v007_remove_oauth_token_setting),
 )
 
 

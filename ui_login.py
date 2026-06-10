@@ -208,17 +208,8 @@ class LoginWindow(tk.Toplevel):
         dialog.wait_window()
 
     def _show_login_error(self, message: str) -> None:
-        """Display login failure details, including attempts or lock duration."""
-        status = auth.get_login_status(self.username_var.get())
-        minutes_remaining = int(status["minutes_remaining"] or 0)
-        failed_attempts = int(status["failed_attempts"] or 0)
-        if minutes_remaining:
-            self.error_var.set(f"Account locked. Try after {minutes_remaining} minutes.")
-        elif failed_attempts and failed_attempts < auth.MAX_FAILED_ATTEMPTS:
-            remaining = auth.MAX_FAILED_ATTEMPTS - failed_attempts
-            self.error_var.set(f"{message}. {remaining} attempts remaining.")
-        else:
-            self.error_var.set(message)
+        """Display the public login failure message without lockout details."""
+        self.error_var.set(message)
 
     def _open_dashboard(self) -> None:
         """Open the dashboard window and notify the startup timeout monitor."""

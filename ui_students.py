@@ -13,6 +13,7 @@ import auth
 from config import SPLASH_BG, SPLASH_FG, STATUS_ACTIVE
 from ledger import active_academic_year, charge_rows
 from ledger_service import LedgerService
+from security_utils import display_aadhaar
 from ui_master_utils import audit, connect_db, ensure_admin_write
 from utils import format_currency, now_str
 
@@ -727,7 +728,7 @@ class BulkImportDialog(tk.Toplevel):
             valid += 1 if ok else 0
             errors += 0 if ok else 1
             self.tree.insert(
-                "", "end", values=(index, row["name"], row["class"], row["dob"], row["phone"], row["aadhaar"], row["status"]),
+                "", "end", values=(index, row["name"], row["class"], row["dob"], row["phone"], display_aadhaar(row["aadhaar"], "ADMIN"), row["status"]),
                 tags=("ok" if ok else "error",),
             )
         self.summary_var.set(f"{valid} valid, {errors} errors")

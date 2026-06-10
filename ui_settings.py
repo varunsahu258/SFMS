@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 import tkinter as tk
 from datetime import datetime
@@ -9,11 +10,15 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from openpyxl import Workbook
+from openpyxl.cell import WriteOnlyCell
+from openpyxl.workbook.protection import WorkbookProtection
 from PIL import Image, ImageTk
 
 import auth
 import backup
+from audit import log_operational_event
 from config import DB_PATH, REPORTS_DIR
+from security_utils import mask_aadhaar, sanitize_excel_cell
 from ui_theme import apply_theme
 
 SCHEDULE_HOURS = (2, 4, 6, 12, 24)
@@ -34,28 +39,72 @@ def _upsert(conn: sqlite3.Connection, key: str, value: str) -> None:
     )
 
 
-def export_full_database_to_excel() -> str:
-    """Export every non-SQLite table to a separate worksheet."""
+EXPORT_COLUMN_BLOCKLIST = {
+    "users": ["password_hash", "failed_attempts", "locked_at"],
+    "settings": [
+        "master_backup_password_hash", "backup_salt", "backup_encrypted_dek",
+        "oauth_token", "gdrive_token_json", "backup_kdf_salt", "backup_wrapped_dek",
+        "backup_wrap_nonce", "machine_id", "machine_id_pending",
+    ],
+    "payments": ["note", "cheque_number", "upi_reference", "cheque_bank_reference"],
+    "cheque_tracker": ["cheque_no", "bank"],
+}
+EXPORT_TABLE_BLOCKLIST = {"audit_log", "receipt_hashes", "schema_migrations"}
+
+
+def _safe_export_cell(sheet, value):
+    if isinstance(value, str):
+        value = sanitize_excel_cell(value)
+        cell = WriteOnlyCell(sheet, value=value)
+        cell.data_type = "s"
+        return cell
+    return value
+
+
+def _export_headers(conn: sqlite3.Connection, table: str) -> list[str]:
+    blocked = set(EXPORT_COLUMN_BLOCKLIST.get(table, ()))
+    headers = [row[1] for row in conn.execute(f'PRAGMA table_info("{table}")') if row[1] not in blocked]
+    if blocked.intersection(headers):
+        raise AssertionError(f"Blocked export columns detected for {table}: {sorted(blocked.intersection(headers))}")
+    return headers
+
+
+def export_full_database_to_excel(exported_by=None, export_password: str | None = None) -> str:
+    """Export non-secret database data to a password-protected workbook."""
     Path(REPORTS_DIR).mkdir(parents=True, exist_ok=True)
     path = Path(REPORTS_DIR) / f"sfms_full_export_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
-    workbook = Workbook()
-    workbook.remove(workbook.active)
+    workbook = Workbook(write_only=True)
+    if export_password:
+        workbook.security = WorkbookProtection(workbookPassword=export_password, lockStructure=True)
     with _connect() as conn:
         tables = [row[0] for row in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
-        )]
+        ) if row[0] not in EXPORT_TABLE_BLOCKLIST]
         for table in tables:
+            headers = _export_headers(conn, table)
+            if not headers:
+                continue
             sheet = workbook.create_sheet(table[:31])
-            cursor = conn.execute(f'SELECT * FROM "{table}"')
-            headers = [item[0] for item in cursor.description]
-            sheet.append(headers)
+            sheet.append([_safe_export_cell(sheet, header) for header in headers])
+            columns_sql = ",".join(f'"{header}"' for header in headers)
+            cursor = conn.execute(f'SELECT {columns_sql} FROM "{table}"')
             for row in cursor:
-                sheet.append(list(row))
-            sheet.freeze_panes = "A2"
-            for column in sheet.columns:
-                width = min(max(len(str(cell.value or "")) for cell in column) + 2, 50)
-                sheet.column_dimensions[column[0].column_letter].width = width
+                values = []
+                for header, value in zip(headers, row):
+                    if "aadhaar" in header.lower():
+                        value = mask_aadhaar(value)
+                    values.append(_safe_export_cell(sheet, value))
+                sheet.append(values)
     workbook.save(path)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    with _connect() as conn:
+        log_operational_event(
+            "DATABASE_EXPORT", exported_by,
+            {"table": "exports", "record_id": path.name, "exported_by": exported_by,
+             "exported_at": datetime.now().isoformat(timespec="seconds"), "export_type": "FULL_DATABASE",
+             "output_filename": str(path), "sha256_of_file": digest}, conn=conn,
+        )
+        conn.commit()
     return str(path)
 
 
@@ -214,8 +263,14 @@ class SettingsWindow(tk.Toplevel):
 
     def export_database(self) -> None:
         auth.touch_session()
+        password = simpledialog.askstring("Data Export", "One-time export password:", show="*", parent=self)
+        if not password:
+            messagebox.showerror("Data Export", "Export password is required.", parent=self)
+            return
         try:
-            path = export_full_database_to_excel()
+            path = export_full_database_to_excel(
+                auth.CURRENT_SESSION.user_id if auth.CURRENT_SESSION else None, password
+            )
         except Exception as exc:
             messagebox.showerror("Data Export", str(exc), parent=self)
             return

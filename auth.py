@@ -13,6 +13,7 @@ import bcrypt
 
 from audit import log_operational_event
 from config import DB_PATH, SETTING_SESSION_TIMEOUT_MINUTES, SESSION_TIMEOUT_DEFAULT
+from security_utils import GENERIC_LOGIN_FAILURE_MESSAGE, MACHINE_AUTHORIZATION_REQUIRED_MESSAGE
 from utils import now_str
 
 LOCKOUT_MINUTES = 30
@@ -77,11 +78,33 @@ def _lock_minutes_remaining(locked_at: str | None) -> int:
     return (seconds_remaining + 59) // 60
 
 
-def login(username, password) -> tuple[bool, str]:
+def _log_login_failure(conn, user_id, username_attempted: str, failure_reason: str, source_ip: str | None = None) -> None:
+    """Write a warning-level internal audit row for an authentication failure."""
+    log_operational_event(
+        LOGIN_FAIL_ACTION,
+        user_id,
+        {
+            "table": USERS_TABLE if user_id is not None else "authentication",
+            "record_id": user_id or username_attempted,
+            "severity": "WARNING",
+            "username_attempted": username_attempted,
+            "failure_reason": failure_reason,
+            "source_ip": source_ip,
+            "timestamp": now_str(),
+        },
+        conn=conn,
+    )
+
+
+def login(username, password, source_ip: str | None = None) -> tuple[bool, str]:
     """Authenticate a user and create CURRENT_SESSION on success."""
     global CURRENT_SESSION
     normalized_username = str(username).strip()
     with _connect() as conn:
+        from integrity import machine_authorization_required
+
+        if machine_authorization_required(conn):
+            return False, MACHINE_AUTHORIZATION_REQUIRED_MESSAGE
         user = conn.execute(
             """
             SELECT id, username, password_hash, role, is_active, failed_attempts, locked_at
@@ -91,15 +114,18 @@ def login(username, password) -> tuple[bool, str]:
             (normalized_username,),
         ).fetchone()
         if user is None:
-            return False, "User not found"
+            _log_login_failure(conn, None, normalized_username, "USER_NOT_FOUND", source_ip)
+            return False, GENERIC_LOGIN_FAILURE_MESSAGE
         if user["is_active"] == 0:
-            return False, "Account deactivated"
+            _log_login_failure(conn, user["id"], normalized_username, "DEACTIVATED", source_ip)
+            return False, GENERIC_LOGIN_FAILURE_MESSAGE
 
         locked_time = _parse_timestamp(user["locked_at"])
         if locked_time is not None:
             locked_for = datetime.now() - locked_time
             if locked_for < timedelta(minutes=LOCKOUT_MINUTES):
-                return False, "Account locked"
+                _log_login_failure(conn, user["id"], normalized_username, "LOCKED", source_ip)
+                return False, GENERIC_LOGIN_FAILURE_MESSAGE
             conn.execute("UPDATE users SET failed_attempts = 0, locked_at = NULL WHERE id = ?", (user["id"],))
             user = conn.execute(
                 """
@@ -119,8 +145,8 @@ def login(username, password) -> tuple[bool, str]:
                 "UPDATE users SET failed_attempts = ?, locked_at = ? WHERE id = ?",
                 (failed_attempts, locked_at, user["id"]),
             )
-            log_operational_event(LOGIN_FAIL_ACTION, user["id"], {"table": USERS_TABLE, "record_id": user["id"]}, conn=conn)
-            return False, "Invalid password"
+            _log_login_failure(conn, user["id"], normalized_username, "BAD_PASSWORD", source_ip)
+            return False, GENERIC_LOGIN_FAILURE_MESSAGE
 
         conn.execute(
             "UPDATE users SET failed_attempts = 0, locked_at = NULL, last_login = ? WHERE id = ?",

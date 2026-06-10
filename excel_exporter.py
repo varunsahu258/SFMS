@@ -9,6 +9,7 @@ from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from config import REPORTS_DIR
+from security_utils import sanitize_excel_cell
 
 NAVY = "1A1A5E"
 WHITE = "FFFFFF"
@@ -66,7 +67,11 @@ def export_to_excel(
     for row_index, item in enumerate(data, start=2):
         for column_index, header in enumerate(headers, start=1):
             value = item.get(header, "")
+            if isinstance(value, str):
+                value = sanitize_excel_cell(value)
             cell = data_sheet.cell(row=row_index, column=column_index, value=value)
+            if isinstance(value, str):
+                cell.data_type = "s"
             if row_index % 2 == 1:
                 cell.fill = alternate_fill
             if column_index in monetary_columns and isinstance(value, (int, float)):
@@ -90,7 +95,8 @@ def export_to_excel(
     for row_index, (key, value) in enumerate(info_rows, start=1):
         key_cell = info_sheet.cell(row=row_index, column=1, value=key)
         key_cell.font = Font(bold=True)
-        info_sheet.cell(row=row_index, column=2, value=str(value or ""))
+        value_cell = info_sheet.cell(row=row_index, column=2, value=sanitize_excel_cell(str(value or "")))
+        value_cell.data_type = "s"
     info_sheet.column_dimensions["A"].width = 18
     info_sheet.column_dimensions["B"].width = 80
 

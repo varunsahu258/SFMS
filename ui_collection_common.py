@@ -188,8 +188,8 @@ class CollectionBaseWindow(tk.Toplevel):
         entry.bind("<KeyRelease>", lambda _event: self.search())
         ttk.Button(top, text="Search", command=self.search).pack(side="left")
 
-        self.student_tree = ttk.Treeview(self, columns=("id", "name", "class", "aadhaar"), show="headings", height=5)
-        for column, heading, width in (("id", "ID", 60), ("name", "Name", 280), ("class", "Class", 120), ("aadhaar", "Aadhaar", 150)):
+        self.student_tree = ttk.Treeview(self, columns=("id", "name", "class"), show="headings", height=5)
+        for column, heading, width in (("id", "ID", 60), ("name", "Name", 280), ("class", "Class", 120)):
             self.student_tree.heading(column, text=heading)
             self.student_tree.column(column, width=width)
         self.student_tree.pack(fill="x", padx=12)
@@ -208,7 +208,7 @@ class CollectionBaseWindow(tk.Toplevel):
         for item in self.student_tree.get_children():
             self.student_tree.delete(item)
         for row in search_students(self.search_var.get().strip()):
-            self.student_tree.insert("", "end", iid=str(row["id"]), values=(row["id"], row["name"], row["class"], row["aadhaar"] or ""))
+            self.student_tree.insert("", "end", iid=str(row["id"]), values=(row["id"], row["name"], row["class"]))
 
     def load_selected_student(self) -> None:
         """Load dues when a student is selected."""

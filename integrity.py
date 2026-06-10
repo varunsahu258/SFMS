@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import hmac
+import platform
+import re
 import socket
 import sqlite3
 import time
@@ -10,9 +13,14 @@ import tkinter as tk
 import uuid
 from tkinter import messagebox
 
+import bcrypt
+
+from receipt_integrity import integrity_key
+from security_utils import MACHINE_AUTHORIZATION_REQUIRED_MESSAGE
 from utils import now_str
 
 MACHINE_ID_SETTING = "machine_id"
+MACHINE_PENDING_SETTING = "machine_id_pending"
 
 
 def _row_value(row, key: str, index: int):
@@ -161,42 +169,91 @@ def startup_integrity_check(conn) -> list:
             pass
 
 
-def record_machine_fingerprint(conn):
-    """Store the first machine identity or audit and warn when it changes."""
-    fingerprint = f"{socket.gethostname()}_{uuid.getnode()}"
-    row = conn.execute(
-        "SELECT value FROM settings WHERE key = ?",
-        (MACHINE_ID_SETTING,),
-    ).fetchone()
-    existing = str(row[0] or "") if row else ""
-    if not existing:
-        conn.execute(
-            """
-            INSERT INTO settings (key, value) VALUES (?, ?)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value
-            """,
-            (MACHINE_ID_SETTING, fingerprint),
-        )
-        conn.commit()
-        return
-    if existing == fingerprint:
-        return
+class MachineAuthorizationRequired(RuntimeError):
+    """Raised when the database is opened on an untrusted machine."""
 
+
+def _sanitize_hostname(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", str(value or "").strip().lower())[:128]
+
+
+def machine_fingerprint() -> str:
+    """Return an HMAC-SHA256 fingerprint over machine attributes."""
+    payload = "|".join(
+        (
+            _sanitize_hostname(socket.gethostname()),
+            str(uuid.getnode()),
+            str(platform.machine() or ""),
+            str(platform.processor() or ""),
+        )
+    ).encode("utf-8")
+    return hmac.new(integrity_key(), payload, hashlib.sha256).hexdigest()
+
+
+def _setting(conn: sqlite3.Connection, key: str) -> str:
+    row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    return str(row[0] or "") if row else ""
+
+
+def _upsert_setting(conn: sqlite3.Connection, key: str, value: str) -> None:
     conn.execute(
-        """
-        INSERT INTO audit_log (
-            timestamp, user_id, action, table_name, record_id,
-            old_value, new_value, tamper_attempt
-        ) VALUES (?, NULL, 'MACHINE_CHANGE', 'settings', ?, ?, ?, 0)
-        """,
+        "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, value),
+    )
+
+
+def machine_authorization_required(conn: sqlite3.Connection) -> bool:
+    """Return True when the live machine fingerprint does not match stored trust."""
+    stored = _setting(conn, MACHINE_ID_SETTING)
+    if not stored:
+        return False
+    current = machine_fingerprint()
+    return not hmac.compare_digest(stored, current)
+
+
+def record_machine_fingerprint(conn):
+    """Store first machine identity or block when the fingerprint changes."""
+    fingerprint = machine_fingerprint()
+    existing = _setting(conn, MACHINE_ID_SETTING)
+    if not existing:
+        _upsert_setting(conn, MACHINE_ID_SETTING, fingerprint)
+        _upsert_setting(conn, MACHINE_PENDING_SETTING, "")
+        conn.commit()
+        return True
+    if hmac.compare_digest(existing, fingerprint):
+        _upsert_setting(conn, MACHINE_PENDING_SETTING, "")
+        conn.commit()
+        return True
+    _upsert_setting(conn, MACHINE_PENDING_SETTING, fingerprint)
+    conn.execute(
+        """INSERT INTO audit_log(timestamp,user_id,action,table_name,record_id,old_value,new_value,tamper_attempt)
+           VALUES(?,NULL,'MACHINE_CHANGE_BLOCKED','settings',?,?,?,0)""",
         (now_str(), MACHINE_ID_SETTING, existing, fingerprint),
     )
+    conn.commit()
+    raise MachineAuthorizationRequired(MACHINE_AUTHORIZATION_REQUIRED_MESSAGE)
+
+
+def authorize_new_machine(conn: sqlite3.Connection, username: str, password: str) -> bool:
+    """Trust the pending/current machine after successful active admin authentication."""
+    row = conn.execute(
+        "SELECT id,password_hash FROM users WHERE username=? AND role='ADMIN' AND is_active=1",
+        (str(username or "").strip(),),
+    ).fetchone()
+    if row is None:
+        return False
+    password_hash = row[1] if not hasattr(row, "keys") else row["password_hash"]
+    if not bcrypt.checkpw(str(password).encode("utf-8"), str(password_hash or "").encode("utf-8")):
+        return False
+    user_id = row[0] if not hasattr(row, "keys") else row["id"]
+    old = _setting(conn, MACHINE_ID_SETTING)
+    new = _setting(conn, MACHINE_PENDING_SETTING) or machine_fingerprint()
+    _upsert_setting(conn, MACHINE_ID_SETTING, new)
+    _upsert_setting(conn, MACHINE_PENDING_SETTING, "")
     conn.execute(
-        "UPDATE settings SET value = ? WHERE key = ?",
-        (fingerprint, MACHINE_ID_SETTING),
+        """INSERT INTO audit_log(timestamp,user_id,action,table_name,record_id,old_value,new_value,tamper_attempt)
+           VALUES(?,?,'MACHINE_AUTHORIZED','settings',?,?,?,0)""",
+        (now_str(), user_id, MACHINE_ID_SETTING, old, new),
     )
     conn.commit()
-    messagebox.showwarning(
-        "SFMS Machine Warning",
-        "WARNING: This database was last used on a different computer.",
-    )
+    return True

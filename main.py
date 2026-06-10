@@ -18,7 +18,7 @@ from config import (
     SPLASH_DURATION_MS,
 )
 from database import init_db
-from integrity import record_machine_fingerprint, startup_integrity_check
+from integrity import MachineAuthorizationRequired, record_machine_fingerprint, startup_integrity_check
 
 _MONITORS_STARTED = False
 
@@ -69,12 +69,23 @@ def _school_name() -> str:
     return row[0] if row and row[0] else SCHOOL_NAME
 
 
-def _open_login(root: tk.Tk) -> None:
-    """Close the splash window and open the login window."""
-    root.destroy()
+def _launch_login_window() -> None:
+    """Open the normal login window."""
     from ui_login import LoginWindow
 
     LoginWindow(on_dashboard_open=start_timeout_monitor)
+
+
+def _open_login(root: tk.Tk) -> None:
+    """Close the splash window and open the appropriate pre-authentication screen."""
+    root.destroy()
+    with sqlite3.connect(DB_PATH) as conn:
+        from ui_first_time_setup import FirstTimeSetupWindow, first_time_setup_required
+
+        if first_time_setup_required(conn):
+            FirstTimeSetupWindow(on_complete=_launch_login_window)
+            return
+    _launch_login_window()
 
 
 def show_splash() -> None:
@@ -200,6 +211,13 @@ def main() -> None:
             args=(integrity_conn,),
             daemon=True,
         ).start()
+    except MachineAuthorizationRequired:
+        integrity_conn.close()
+        from ui_machine_authorization import MachineAuthorizationWindow
+
+        MachineAuthorizationWindow(on_complete=show_splash)
+        tk.mainloop()
+        return
     except Exception:
         integrity_conn.close()
         raise
