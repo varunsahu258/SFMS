@@ -169,12 +169,21 @@ def login(username, password, source_ip: str | None = None) -> tuple[bool, str]:
 
 
 def logout() -> None:
-    """Log out the current user, audit the event, and clear CURRENT_SESSION."""
+    """Log out the current user, clearing the session even if audit logging fails."""
     global CURRENT_SESSION
-    if CURRENT_SESSION is not None:
-        with _connect() as conn:
-            log_operational_event(LOGOUT_ACTION, CURRENT_SESSION.user_id, {"table": USERS_TABLE, "record_id": CURRENT_SESSION.user_id}, conn=conn)
-    CURRENT_SESSION = None
+    session = CURRENT_SESSION
+    try:
+        if session is not None:
+            with _connect() as conn:
+                log_operational_event(
+                    LOGOUT_ACTION, session.user_id,
+                    {"table": USERS_TABLE, "record_id": session.user_id}, conn=conn,
+                )
+    except sqlite3.Error:
+        # A database/audit failure must never prevent local logout.
+        pass
+    finally:
+        CURRENT_SESSION = None
 
 
 def require_role(*roles):
