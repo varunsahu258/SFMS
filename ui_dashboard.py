@@ -48,7 +48,10 @@ def load_cashflow_summary(conn) -> tuple[str, list[tuple[str, float]]]:
         else:
             cursor_month += 1
     totals = {key: 0.0 for key in month_keys}
-    for payment_date, amount_paid in conn.execute("SELECT payment_date, amount_paid FROM payments"):
+    for payment_date, amount_paid in conn.execute(
+        "SELECT p.payment_date,a.amount_allocated FROM payment_allocations a JOIN payments p ON p.id=a.payment_id JOIN student_charges c ON c.id=a.charge_id WHERE c.academic_year=?",
+        (label,),
+    ):
         parsed = _parse_date(payment_date)
         if parsed is not None and start <= parsed <= end:
             key = (parsed.year, parsed.month)

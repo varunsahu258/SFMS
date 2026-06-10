@@ -10,6 +10,7 @@ from tkinter import messagebox, ttk
 import auth
 from audit import log_action
 from config import DB_PATH, SPLASH_BG, SPLASH_FG
+from ledger import allocate_payment
 from utils import compute_hash, format_currency, generate_receipt_no, now_str, today_str
 
 
@@ -60,12 +61,20 @@ def create_void_receipt(
             """,
             (
                 original["student_id"], void_receipt_no,
-                original["fee_head_id"], original["amount_due"],
-                reversed_amount, original["balance"], payment_date,
+                original["fee_head_id"], abs(float(original["amount_paid"] or 0)),
+                reversed_amount, abs(float(original["amount_paid"] or 0)), payment_date,
                 user_id, original["payment_mode"],
                 f"VOID of {original_receipt_no}", payment_hash,
             ),
         )
+        allocations = conn.execute(
+            "SELECT charge_id,amount_allocated FROM payment_allocations WHERE payment_id=?",
+            (original["id"],),
+        ).fetchall()
+        if not allocations:
+            raise ValueError("Original payment has no charge allocation and cannot be safely voided.")
+        for allocation in allocations:
+            allocate_payment(conn, cursor.lastrowid, allocation["charge_id"], -float(allocation["amount_allocated"]), "REVERSAL")
         void_payment_ids.append(cursor.lastrowid)
         total_voided += reversed_amount
 

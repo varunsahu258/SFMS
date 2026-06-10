@@ -21,6 +21,7 @@ from reportlab.pdfgen import canvas
 from config import REPORTS_DIR, SCHOOL_NAME
 from excel_exporter import export_to_excel
 from audit import log_action
+from ledger import active_academic_year, all_outstanding_total, ensure_student_charges
 from utils import format_currency, today_str
 
 MARGIN = 20 * mm
@@ -295,21 +296,19 @@ def monthly_report(conn, year, month) -> str:
 
 def classwise_dues_report(conn, class_name, academic_year, student_id=None) -> str:
     """Generate outstanding fee-head balances for every student in a class."""
+    if academic_year == active_academic_year(conn):
+        ensure_student_charges(conn, academic_year, student_id)
     rows = _row_dicts(conn.execute(
         """
-        SELECT s.id AS student_id, s.name AS student, fh.name AS fee_head,
-               fs.amount AS amount_due, fs.due_date,
-               COALESCE(SUM(p.amount_paid), 0) AS paid,
-               fs.amount - COALESCE(SUM(p.amount_paid), 0) AS balance
-        FROM students s
-        JOIN fee_structure fs ON fs.class = s.class AND fs.academic_year = ?
-        JOIN fee_heads fh ON fh.id = fs.fee_head_id
-        LEFT JOIN payments p ON p.student_id = s.id AND p.fee_head_id = fs.fee_head_id
-        WHERE s.class = ? AND s.is_active = 1
-          AND (? IS NULL OR s.id = ?)
-        GROUP BY s.id, fs.id
-        HAVING balance > 0
-        ORDER BY s.name, fh.name
+        SELECT s.id AS student_id,s.name AS student,fh.name AS fee_head,
+               l.original_amount AS amount_due,l.due_date,l.paid,l.adjustments,l.balance
+        FROM charge_ledger l
+        JOIN students s ON s.id=l.student_id
+        JOIN fee_heads fh ON fh.id=l.fee_head_id
+        LEFT JOIN fee_structure fs ON fs.id=l.fee_structure_id
+        WHERE l.academic_year=? AND COALESCE(fs.class,s.class)=? AND s.is_active=1
+              AND l.balance>0 AND l.status<>'CANCELLED' AND (? IS NULL OR s.id=?)
+        ORDER BY s.name,fh.name
         """,
         (academic_year, class_name, student_id, student_id),
     ))
@@ -335,29 +334,31 @@ def defaulter_report(conn, days_threshold) -> str:
     """Generate students with positive old payment balances, highest balance first."""
     threshold = int(days_threshold)
     cutoff = date.today() - timedelta(days=threshold)
+    current_year = active_academic_year(conn)
+    if current_year:
+        ensure_student_charges(conn, current_year)
     rows = _row_dicts(conn.execute(
         """
-        SELECT s.id, s.name AS student, s.class, p.payment_date, p.balance, fh.name AS fee_head
-        FROM payments p
-        JOIN students s ON s.id = p.student_id
-        LEFT JOIN fee_heads fh ON fh.id = p.fee_head_id
-        WHERE p.balance > 0
-        ORDER BY s.name, p.payment_date
+        SELECT s.id,s.name AS student,s.class,l.due_date,l.balance,fh.name AS fee_head
+        FROM charge_ledger l JOIN students s ON s.id=l.student_id
+        JOIN fee_heads fh ON fh.id=l.fee_head_id
+        WHERE l.balance>0 AND l.status<>'CANCELLED' AND s.is_active=1
+        ORDER BY s.name,l.due_date
         """
     ))
     groups: dict[int, dict] = {}
     for row in rows:
-        payment_date = _parse_date(row.get("payment_date"))
+        payment_date = _parse_date(row.get("due_date"))
         if not payment_date or payment_date >= cutoff:
             continue
-        group = groups.setdefault(row["id"], {"student": row["student"], "class": row.get("class") or "", "last_payment": payment_date, "heads": [], "balance": 0.0})
-        group["last_payment"] = max(group["last_payment"], payment_date)
+        group = groups.setdefault(row["id"], {"student": row["student"], "class": row.get("class") or "", "oldest_due": payment_date, "heads": [], "balance": 0.0})
+        group["oldest_due"] = min(group["oldest_due"], payment_date)
         group["heads"].append(row.get("fee_head") or "Fee")
         group["balance"] += float(row.get("balance") or 0)
     ordered = sorted(groups.values(), key=lambda item: item["balance"], reverse=True)
-    data = [["Student", "Class", "Fee Heads", "Last Payment", "Days", "Total Balance"]]
+    data = [["Student", "Class", "Fee Heads", "Oldest Due", "Days", "Total Balance"]]
     for group in ordered:
-        data.append([group["student"], group["class"], ", ".join(sorted(set(group["heads"]))), group["last_payment"].strftime("%d-%m-%Y"), (date.today() - group["last_payment"]).days, format_currency(group["balance"])])
+        data.append([group["student"], group["class"], ", ".join(sorted(set(group["heads"]))), group["oldest_due"].strftime("%d-%m-%Y"), (date.today() - group["oldest_due"]).days, format_currency(group["balance"])])
     if len(data) == 1:
         data.append(["No defaulters", "", "", "", "", format_currency(0)])
     path = _output_path(f"defaulters_{threshold}_days.pdf")
@@ -370,38 +371,29 @@ def defaulter_report(conn, days_threshold) -> str:
 
 def ytd_report(conn, academic_year) -> str:
     """Generate expected, collected, and outstanding totals per class."""
+    if academic_year == active_academic_year(conn):
+        ensure_student_charges(conn, academic_year)
     expected_rows = _row_dicts(conn.execute(
         """
-        SELECT fs.class, SUM(fs.amount) AS fee_total,
-               (SELECT COUNT(*) FROM students s WHERE s.class = fs.class AND s.is_active = 1) AS student_count
-        FROM fee_structure fs
-        WHERE fs.academic_year = ?
-        GROUP BY fs.class
-        ORDER BY fs.class
-        """,
-        (academic_year,),
+        SELECT COALESCE(fs.class,s.class) AS class,COUNT(DISTINCT s.id) AS student_count,
+               SUM(l.original_amount) AS expected,SUM(l.paid) AS collected,SUM(l.balance) AS outstanding
+        FROM charge_ledger l JOIN students s ON s.id=l.student_id
+        LEFT JOIN fee_structure fs ON fs.id=l.fee_structure_id
+        WHERE l.academic_year=? AND l.status<>'CANCELLED'
+        GROUP BY COALESCE(fs.class,s.class) ORDER BY class
+        """, (academic_year,)
     ))
-    bounds = _academic_bounds(conn, academic_year)
-    payment_rows = _row_dicts(conn.execute(
-        """
-        SELECT s.class, p.amount_paid, p.payment_date
-        FROM payments p JOIN students s ON s.id = p.student_id
-        """
-    ))
-    collected: defaultdict[str, float] = defaultdict(float)
-    for row in payment_rows:
-        if _in_bounds(row.get("payment_date"), bounds):
-            collected[row.get("class") or ""] += float(row.get("amount_paid") or 0)
     data = [["Class", "Students", "Expected", "Collected", "Outstanding"]]
-    expected_total = collected_total = 0.0
+    expected_total = collected_total = outstanding_total = 0.0
     for row in expected_rows:
-        expected = float(row.get("fee_total") or 0) * int(row.get("student_count") or 0)
-        class_collected = collected[row.get("class") or ""]
-        outstanding = expected - class_collected
+        expected = float(row.get("expected") or 0)
+        class_collected = float(row.get("collected") or 0)
+        outstanding = float(row.get("outstanding") or 0)
         data.append([row.get("class") or "", row.get("student_count") or 0, format_currency(expected), format_currency(class_collected), format_currency(outstanding)])
         expected_total += expected
         collected_total += class_collected
-    data.append(["TOTAL", "", format_currency(expected_total), format_currency(collected_total), format_currency(expected_total - collected_total)])
+        outstanding_total += outstanding
+    data.append(["TOTAL", "", format_currency(expected_total), format_currency(collected_total), format_currency(outstanding_total)])
     path = _output_path(f"ytd_{_safe_name(academic_year)}.pdf")
     story: list = []
     _header(story, conn, f"Year-to-Date Report — {academic_year}")
@@ -413,7 +405,10 @@ def ytd_report(conn, academic_year) -> str:
 def cashflow_chart_report(conn, academic_year) -> str:
     """Generate a black-and-white monthly collection bar chart."""
     bounds = _academic_bounds(conn, academic_year)
-    rows = _row_dicts(conn.execute("SELECT payment_date, amount_paid FROM payments"))
+    rows = _row_dicts(conn.execute(
+        "SELECT p.payment_date,a.amount_allocated AS amount_paid FROM payment_allocations a JOIN payments p ON p.id=a.payment_id JOIN student_charges c ON c.id=a.charge_id WHERE c.academic_year=?",
+        (academic_year,),
+    ))
     monthly: defaultdict[tuple[int, int], float] = defaultdict(float)
     for row in rows:
         parsed = _parse_date(row.get("payment_date"))
@@ -506,22 +501,19 @@ def audit_export(conn, filters=None) -> str:
 
 def fee_notice_pdf(conn, class_name) -> str:
     """Generate one black-and-white A4 fee notice per student with dues."""
+    year = active_academic_year(conn)
+    ensure_student_charges(conn, year)
     rows = _row_dicts(conn.execute(
         """
-        SELECT s.id AS student_id, s.name AS student, s.class,
-               fh.name AS fee_head, fs.amount AS amount_due, fs.due_date,
-               COALESCE(SUM(p.amount_paid), 0) AS paid,
-               fs.amount - COALESCE(SUM(p.amount_paid), 0) AS balance
-        FROM students s
-        JOIN fee_structure fs ON fs.class = s.class
-        JOIN fee_heads fh ON fh.id = fs.fee_head_id
-        LEFT JOIN payments p ON p.student_id = s.id AND p.fee_head_id = fs.fee_head_id
-        WHERE s.class = ? AND s.is_active = 1
-        GROUP BY s.id, fs.id
-        HAVING balance > 0
-        ORDER BY s.name, fh.name
-        """,
-        (class_name,),
+        SELECT s.id AS student_id,s.name AS student,s.class,fh.name AS fee_head,
+               l.original_amount AS amount_due,l.due_date,l.paid,l.adjustments,l.balance
+        FROM charge_ledger l JOIN students s ON s.id=l.student_id
+        JOIN fee_heads fh ON fh.id=l.fee_head_id
+        LEFT JOIN fee_structure fs ON fs.id=l.fee_structure_id
+        WHERE l.academic_year=? AND COALESCE(fs.class,s.class)=? AND s.is_active=1
+              AND l.balance>0 AND l.status<>'CANCELLED'
+        ORDER BY s.name,fh.name
+        """, (year,class_name)
     ))
     students: dict[int, dict] = {}
     for row in rows:
@@ -582,12 +574,14 @@ def feehead_collection_report(conn, academic_year, month=None) -> str:
     month_value = int(month) if month not in (None, "") else None
     rows = _row_dicts(conn.execute(
         """
-        SELECT fh.id AS fee_head_id, fh.name AS fee_head,
-               p.amount_paid, p.payment_date
-        FROM payments p
-        JOIN fee_heads fh ON fh.id = p.fee_head_id
-        ORDER BY fh.name, p.payment_date
-        """
+        SELECT fh.id AS fee_head_id,fh.name AS fee_head,
+               a.amount_allocated AS amount_paid,p.payment_date
+        FROM payment_allocations a JOIN payments p ON p.id=a.payment_id
+        JOIN student_charges c ON c.id=a.charge_id
+        JOIN fee_heads fh ON fh.id=c.fee_head_id
+        WHERE c.academic_year=?
+        ORDER BY fh.name,p.payment_date
+        """, (academic_year,)
     ))
     totals: defaultdict[str, float] = defaultdict(float)
     for row in rows:
@@ -706,8 +700,9 @@ def discount_register_report(conn, academic_year) -> str:
         JOIN students s ON s.id = d.student_id
         JOIN fee_heads fh ON fh.id = d.fee_head_id
         LEFT JOIN users u ON u.id = d.approved_by
+        WHERE d.academic_year=?
         ORDER BY d.created_at, s.name, fh.name
-        """
+        """, (academic_year,)
     ))
     filtered = []
     for row in rows:
@@ -816,16 +811,12 @@ def transfer_certificate(conn, student_id, override_dues=False, override_reason=
         ("id", "name", "class", "section", "guardian_name", "created_at"), student
     ))
     payment_summary = conn.execute(
-        """
-        SELECT COUNT(*) AS payment_count, COALESCE(SUM(amount_paid), 0) AS lifetime_paid,
-               COALESCE(SUM(balance), 0) AS outstanding_dues
-        FROM payments WHERE student_id = ?
-        """,
+        "SELECT COUNT(*),COALESCE(SUM(amount_paid),0) FROM payments WHERE student_id=?",
         (student_id,),
     ).fetchone()
     payment_count = int(payment_summary[0] or 0)
     lifetime_paid = float(payment_summary[1] or 0)
-    dues = float(payment_summary[2] or 0)
+    dues = all_outstanding_total(conn, student_id)
     if dues > 0 and not override_dues:
         raise Exception(f"Dues: {format_currency(dues)}")
     if dues > 0 and override_dues and not str(override_reason).strip():
