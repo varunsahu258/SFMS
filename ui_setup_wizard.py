@@ -12,6 +12,7 @@ import bcrypt
 from PIL import Image, ImageTk
 
 import auth
+from audit import log_action
 from config import DB_PATH
 
 
@@ -33,6 +34,8 @@ class SetupWizardWindow(tk.Toplevel):
     """Collect mandatory first-run administrator and school configuration."""
 
     def __init__(self, master=None, on_complete=None):
+        if auth.CURRENT_SESSION is None or auth.CURRENT_SESSION.role != "ADMIN":
+            raise PermissionError("Initial setup requires an authenticated administrator.")
         super().__init__(master)
         self.on_complete = on_complete
         self.title("SFMS First-Run Setup")
@@ -173,7 +176,13 @@ class SetupWizardWindow(tk.Toplevel):
     def finish(self) -> None:
         password_hash = bcrypt.hashpw(self.password.get().encode(), bcrypt.gensalt()).decode()
         with _connect() as conn:
-            conn.execute("UPDATE users SET password_hash=? WHERE id=?", (password_hash, auth.CURRENT_SESSION.user_id))
+            admin = conn.execute(
+                "SELECT id FROM users WHERE role='ADMIN' AND is_active=1 ORDER BY id LIMIT 1"
+            ).fetchone()
+            if admin is None:
+                raise RuntimeError("No active designated administrator account exists.")
+            admin_id = int(admin[0])
+            conn.execute("UPDATE users SET password_hash=? WHERE id=?", (password_hash, admin_id))
             settings = {
                 "school_name": self.school_name.get().strip(), "school_address": self.school_address.get().strip(),
                 "logo_path": self.logo_path.get().strip(), "setup_complete": "1", "ui_theme": "light", "ui_language": "en",
@@ -188,6 +197,10 @@ class SetupWizardWindow(tk.Toplevel):
                 "INSERT INTO academic_years(label,start_date,end_date,is_active) VALUES (?,?,?,1) "
                 "ON CONFLICT(label) DO UPDATE SET start_date=excluded.start_date,end_date=excluded.end_date,is_active=1",
                 (self.year_label.get().strip(), self.start_date.get(), self.end_date.get()),
+            )
+            log_action(
+                conn, auth.CURRENT_SESSION.user_id, "setup_completed", "settings",
+                "setup_complete", "0", "1",
             )
         self.grab_release()
         self.destroy()

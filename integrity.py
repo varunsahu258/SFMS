@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import socket
 import sqlite3
 import time
@@ -9,7 +10,7 @@ import tkinter as tk
 import uuid
 from tkinter import messagebox
 
-from utils import compute_hash, now_str
+from utils import now_str
 
 MACHINE_ID_SETTING = "machine_id"
 
@@ -19,76 +20,114 @@ def _row_value(row, key: str, index: int):
     return row[key] if hasattr(row, "keys") else row[index]
 
 
-def _receipt_hash(conn: sqlite3.Connection, receipt_no: str) -> str | None:
-    """Recompute the aggregate receipt hash from immutable payment rows."""
-    rows = conn.execute(
-        """
-        SELECT id, student_id, fee_head_id, amount_paid, payment_date, hash
-        FROM payments
-        WHERE receipt_no = ?
-        ORDER BY id
-        """,
-        (receipt_no,),
-    ).fetchall()
-    if not rows:
-        return None
-    student_id = _row_value(rows[0], "student_id", 1)
-    payment_date = _row_value(rows[0], "payment_date", 4)
-    for row in rows:
-        payment_id = _row_value(row, "id", 0)
-        row_student_id = _row_value(row, "student_id", 1)
-        fee_head_id = _row_value(row, "fee_head_id", 2)
-        amount_paid = float(_row_value(row, "amount_paid", 3) or 0)
-        stored_payment_hash = str(_row_value(row, "hash", 5) or "")
-        expected_payment_hash = compute_hash(receipt_no, row_student_id, amount_paid, _row_value(row, "payment_date", 4))
-        allocations = conn.execute(
-            """
-            SELECT a.amount_allocated,a.allocation_type,c.student_id,c.fee_head_id
-            FROM payment_allocations a JOIN student_charges c ON c.id=a.charge_id
-            WHERE a.payment_id=?
-            """, (payment_id,)
-        ).fetchall()
-        allocated_total = sum(
-            -abs(float(item[0])) if item[1] == "REVERSAL" else float(item[0])
-            for item in allocations
-        )
-        if not allocations or abs(allocated_total-amount_paid) > 0.005:
-            return None
-        if any(item[2] != row_student_id or item[3] != fee_head_id for item in allocations):
-            return None
-        if stored_payment_hash != expected_payment_hash:
-            return None
-    total_paid = sum(float(_row_value(row, "amount_paid", 3) or 0) for row in rows)
-    return compute_hash(receipt_no, student_id, total_paid, payment_date)
+def verify_single_receipt(receipt_id: int, conn: sqlite3.Connection | None = None) -> tuple[bool, str]:
+    """Verify one receipt HMAC, opening DB_PATH when no connection is supplied."""
+    from config import DB_PATH
+    from receipt_integrity import ALGORITHM, canonical_signed_json, compute_receipt_hmac, signed_receipt_fields
+
+    owns_connection = conn is None
+    if conn is None:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+    try:
+        receipt = conn.execute("SELECT receipt_no FROM receipts WHERE id=?", (receipt_id,)).fetchone()
+        if receipt is None:
+            return False, "receipt not found"
+        payment = conn.execute("SELECT 1 FROM payments WHERE receipt_no=? LIMIT 1", (receipt[0],)).fetchone()
+        if payment is None:
+            return False, "orphan receipt: no corresponding payment"
+        stored = conn.execute(
+            "SELECT hmac_value,signed_fields_json,algorithm FROM receipt_hashes WHERE receipt_id=?",
+            (receipt_id,),
+        ).fetchone()
+        if stored is None:
+            return False, "missing receipt_hashes entry"
+        if stored[2] != ALGORITHM:
+            return False, f"unsupported integrity algorithm: {stored[2]}"
+        fields = signed_receipt_fields(conn, receipt_id)
+        canonical = canonical_signed_json(fields)
+        if stored[1] != canonical:
+            return False, "signed field snapshot differs from receipt data"
+        expected = compute_receipt_hmac(fields)
+        if not hmac.compare_digest(str(stored[0] or ""), expected):
+            return False, "HMAC mismatch"
+        return True, "ok"
+    except RuntimeError as exc:
+        return False, str(exc)
+    finally:
+        if owns_connection:
+            conn.close()
+
+
+def _sequence_gaps(receipt_numbers: list[str]) -> list[str]:
+    """Return missing RCP-YYYY-NNNNNN receipt numbers grouped by prefix."""
+    import re
+
+    groups: dict[str, set[int]] = {}
+    widths: dict[str, int] = {}
+    for receipt_no in receipt_numbers:
+        match = re.fullmatch(r"(.+?-)(\d+)", str(receipt_no))
+        if not match:
+            continue
+        prefix, sequence = match.groups()
+        groups.setdefault(prefix, set()).add(int(sequence))
+        widths[prefix] = max(widths.get(prefix, 0), len(sequence))
+    gaps: list[str] = []
+    for prefix, values in groups.items():
+        if len(values) < 2:
+            continue
+        for missing in sorted(set(range(min(values), max(values) + 1)) - values):
+            gaps.append(f"{prefix}{missing:0{widths[prefix]}d}")
+    return gaps
+
+
+def _audit_integrity_issue(conn: sqlite3.Connection, record_id: str, reason: str) -> None:
+    conn.execute(
+        """INSERT INTO audit_log(timestamp,user_id,action,table_name,record_id,
+               old_value,new_value,tamper_attempt)
+           VALUES (?,NULL,'TAMPER_DETECTED','receipt_hashes',?,NULL,?,1)""",
+        (now_str(), record_id, reason),
+    )
 
 
 def verify_all_hashes(conn) -> dict:
-    """Verify every stored receipt hash and audit each detected mismatch."""
-    result = {"ok": [], "mismatch": []}
-    rows = conn.execute(
-        "SELECT receipt_no, sha256_hash FROM receipt_hashes ORDER BY receipt_no"
-    ).fetchall()
-    for row in rows:
-        receipt_no = str(_row_value(row, "receipt_no", 0))
-        stored_hash = str(_row_value(row, "sha256_hash", 1) or "")
-        computed_hash = _receipt_hash(conn, receipt_no)
-        if computed_hash is not None and computed_hash == stored_hash:
-            result["ok"].append(receipt_no)
-            continue
+    """Verify HMACs and detect missing hashes, orphan records, and sequence gaps."""
+    receipt_rows = conn.execute("SELECT id,receipt_no FROM receipts ORDER BY id").fetchall()
+    receipts = {int(row[0]): str(row[1]) for row in receipt_rows}
+    result = {
+        "ok": [], "mismatch": [], "orphan_payments": [], "orphan_receipts": [],
+        "missing_hashes": [], "sequence_gaps": _sequence_gaps(list(receipts.values())),
+    }
 
-        result["mismatch"].append(receipt_no)
-        conn.execute(
-            """
-            INSERT INTO audit_log (
-                timestamp, user_id, action, table_name, record_id,
-                old_value, new_value, tamper_attempt
-            ) VALUES (?, NULL, 'TAMPER_DETECTED', 'receipt_hashes', ?, ?, ?, 1)
-            """,
-            (now_str(), receipt_no, stored_hash, computed_hash),
-        )
+    orphan_payment_rows = conn.execute(
+        """SELECT DISTINCT p.receipt_no FROM payments p
+           LEFT JOIN receipts r ON r.receipt_no=p.receipt_no
+           LEFT JOIN receipt_hashes h ON h.receipt_no=p.receipt_no
+           WHERE r.id IS NULL OR h.receipt_id IS NULL ORDER BY p.receipt_no"""
+    ).fetchall()
+    result["orphan_payments"] = [str(row[0]) for row in orphan_payment_rows]
+
+    for receipt_id, receipt_no in receipts.items():
+        has_payment = conn.execute("SELECT 1 FROM payments WHERE receipt_no=? LIMIT 1", (receipt_no,)).fetchone()
+        if not has_payment:
+            result["orphan_receipts"].append(receipt_no)
+            continue
+        has_hash = conn.execute("SELECT 1 FROM receipt_hashes WHERE receipt_id=?", (receipt_id,)).fetchone()
+        if not has_hash:
+            result["missing_hashes"].append(receipt_no)
+            continue
+        ok, reason = verify_single_receipt(receipt_id, conn)
+        if ok:
+            result["ok"].append(receipt_no)
+        else:
+            result["mismatch"].append(receipt_no)
+            _audit_integrity_issue(conn, receipt_no, reason)
+
+    for category in ("orphan_payments", "orphan_receipts", "missing_hashes", "sequence_gaps"):
+        for receipt_no in result[category]:
+            _audit_integrity_issue(conn, receipt_no, category)
     conn.commit()
     return result
-
 
 def _show_integrity_warning(count: int) -> None:
     """Schedule the integrity warning on Tk's UI thread when a root is ready."""
@@ -108,7 +147,10 @@ def startup_integrity_check(conn) -> list:
     """Run receipt verification in a daemon worker and return mismatch receipt numbers."""
     try:
         result = verify_all_hashes(conn)
-        mismatches = result["mismatch"]
+        mismatches = sorted(set(
+            result["mismatch"] + result["orphan_payments"] + result["orphan_receipts"]
+            + result["missing_hashes"] + result["sequence_gaps"]
+        ))
         if mismatches:
             _show_integrity_warning(len(mismatches))
         return mismatches

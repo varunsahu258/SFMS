@@ -10,8 +10,9 @@ import auth
 from audit import log_action
 from config import SPLASH_BG, SPLASH_FG
 from ledger import active_academic_year, allocate_payment, ensure_student_charges
+from receipt_integrity import sign_receipt
 from ui_collection_common import connect_db, require_session, search_students
-from utils import compute_hash, generate_receipt_no, now_str, today_str
+from utils import generate_receipt_no, now_str, today_str
 
 
 class AdvancePaymentWindow(tk.Toplevel):
@@ -122,7 +123,7 @@ class AdvancePaymentWindow(tk.Toplevel):
         with connect_db() as conn:
             receipt_no = generate_receipt_no(conn)
             payment_date = today_str()
-            payment_hash = compute_hash(receipt_no, self.selected_student_id, amount, payment_date)
+            payment_hash = ""
             cursor = conn.execute(
                 """
                 INSERT INTO payments (
@@ -133,18 +134,14 @@ class AdvancePaymentWindow(tk.Toplevel):
                 (self.selected_student_id, receipt_no, fee_head_id, 0, amount, 0, payment_date, auth.CURRENT_SESSION.user_id, payment_hash),
             )
             allocate_payment(conn, cursor.lastrowid, charge_id, amount, "ADVANCE")
-            receipt_hash = compute_hash(receipt_no, self.selected_student_id, amount, payment_date)
-            conn.execute(
+            receipt_cursor = conn.execute(
                 """
                 INSERT INTO receipts (receipt_no, student_id, total_paid, receipt_type, printed_at, printed_by, reprint_count)
                 VALUES (?, ?, ?, 'ADVANCE', ?, ?, 0)
                 """,
                 (receipt_no, self.selected_student_id, amount, now_str(), auth.CURRENT_SESSION.user_id),
             )
-            conn.execute(
-                "INSERT INTO receipt_hashes (receipt_no, sha256_hash, created_at) VALUES (?, ?, ?)",
-                (receipt_no, receipt_hash, now_str()),
-            )
+            sign_receipt(conn, receipt_cursor.lastrowid)
             log_action(
                 conn,
                 auth.CURRENT_SESSION.user_id,

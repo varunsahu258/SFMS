@@ -12,8 +12,9 @@ from audit import log_action
 from config import DB_PATH, SPLASH_BG, SPLASH_FG
 from ledger import active_academic_year, allocate_payment, charge_rows
 from payment_controls import normalize_reference
+from receipt_integrity import sign_receipt
 from receipt_printer import print_receipt
-from utils import compute_hash, format_currency, generate_receipt_no, now_str, today_str
+from utils import format_currency, generate_receipt_no, now_str, today_str
 
 PAYMENT_MODES = ("CASH", "CHEQUE", "UPI")
 MODE_LABELS = ("Cash", "Cheque", "UPI")
@@ -335,7 +336,7 @@ class CollectionBaseWindow(tk.Toplevel):
                 amount_paid = float(item["amount_paying"])
                 # Legacy payments.balance is not authoritative; charge_ledger derives outstanding.
                 balance = 0.0
-                payment_hash = compute_hash(receipt_no, self.selected_student_id, amount_paid, payment_date)
+                payment_hash = ""
                 cursor = conn.execute(
                     """
                     INSERT INTO payments (
@@ -362,18 +363,14 @@ class CollectionBaseWindow(tk.Toplevel):
                         """,
                         (cursor.lastrowid, item["cheque_no"], item["bank"], amount_paid, payment_date, now_str()),
                     )
-            receipt_hash = compute_hash(receipt_no, self.selected_student_id, total, payment_date)
-            conn.execute(
+            receipt_cursor = conn.execute(
                 """
                 INSERT INTO receipts (receipt_no, student_id, total_paid, receipt_type, printed_at, printed_by, reprint_count)
                 VALUES (?, ?, ?, ?, ?, ?, 0)
                 """,
                 (receipt_no, self.selected_student_id, total, self.receipt_type, now_str(), auth.CURRENT_SESSION.user_id),
             )
-            conn.execute(
-                "INSERT INTO receipt_hashes (receipt_no, sha256_hash, created_at) VALUES (?, ?, ?)",
-                (receipt_no, receipt_hash, now_str()),
-            )
+            sign_receipt(conn, receipt_cursor.lastrowid)
             log_action(
                 conn,
                 auth.CURRENT_SESSION.user_id,

@@ -16,6 +16,7 @@ from ledger import (
     migrate_legacy_ledger,
 )
 from payment_controls import migrate_payment_controls
+from receipt_integrity import install_receipt_hmac_schema
 
 
 def schema(conn: sqlite3.Connection) -> None:
@@ -46,6 +47,7 @@ def schema(conn: sqlite3.Connection) -> None:
         """
     )
     migrate_payment_controls(conn)
+    install_receipt_hmac_schema(conn)
     install_ledger_schema(conn)
 
 
@@ -110,7 +112,10 @@ def test_partial_and_full_payment_voids_restore_derived_outstanding():
     import sys
     import types
 
+    import base64
+    import os
     sys.modules.setdefault("bcrypt", types.SimpleNamespace(checkpw=lambda *_args: False))
+    os.environ["SFMS_INTEGRITY_KEY"] = base64.urlsafe_b64encode(b"k" * 32).decode("ascii")
     from ui_void_payment import create_void_receipt
 
     conn = sqlite3.connect(":memory:")

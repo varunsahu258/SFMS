@@ -9,6 +9,7 @@ from tkinter import ttk
 
 import auth
 from config import APP_TITLE, DB_PATH, SCHOOL_NAME
+from audit import log_action
 from utils import format_currency
 
 ERROR_FG = "#ff6b6b"
@@ -25,6 +26,21 @@ def _configured_school_name() -> str:
     except sqlite3.Error:
         return SCHOOL_NAME
     return str(row[0]) if row and row[0] else SCHOOL_NAME
+
+
+def should_show_setup(conn: sqlite3.Connection, role: str, user_id: int | None = None) -> bool:
+    """Allow the mandatory setup wizard only for an authenticated administrator."""
+    row = conn.execute("SELECT value FROM settings WHERE key='setup_complete'").fetchone()
+    incomplete = row is not None and str(row[0]) == "0"
+    if not incomplete:
+        return False
+    if str(role or "").upper() == "ADMIN":
+        return True
+    log_action(
+        conn, user_id, "SETUP_INCOMPLETE_NON_ADMIN_LOGIN", "settings", "setup_complete",
+        "0", "Wizard suppressed; administrator action required",
+    )
+    return False
 
 
 class LoginWindow(tk.Toplevel):
@@ -111,9 +127,13 @@ class LoginWindow(tk.Toplevel):
         success, message = auth.login(self.username_var.get(), self.password_var.get())
         if success:
             is_accountant = auth.CURRENT_SESSION is not None and auth.CURRENT_SESSION.role == "ACCOUNTANT"
-            from ui_setup_wizard import SetupWizardWindow, setup_is_complete
+            from ui_setup_wizard import SetupWizardWindow
 
-            if not setup_is_complete():
+            with sqlite3.connect(DB_PATH) as conn:
+                show_setup = should_show_setup(
+                    conn, auth.CURRENT_SESSION.role, auth.CURRENT_SESSION.user_id
+                )
+            if show_setup:
                 self.withdraw()
                 SetupWizardWindow(self, on_complete=lambda: self._finish_login(is_accountant))
                 return

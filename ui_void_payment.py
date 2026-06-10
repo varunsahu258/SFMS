@@ -11,7 +11,8 @@ import auth
 from audit import log_action
 from config import DB_PATH, SPLASH_BG, SPLASH_FG
 from ledger import allocate_payment
-from utils import compute_hash, format_currency, generate_receipt_no, now_str, today_str
+from receipt_integrity import sign_receipt
+from utils import format_currency, generate_receipt_no, now_str, today_str
 
 
 def _connect() -> sqlite3.Connection:
@@ -52,12 +53,7 @@ def create_void_receipt(
     void_payment_ids: list[int] = []
     for original in original_payments:
         reversed_amount = -float(original["amount_paid"] or 0)
-        payment_hash = compute_hash(
-            void_receipt_no,
-            original["student_id"],
-            reversed_amount,
-            payment_date,
-        )
+        payment_hash = ""
         cursor = conn.execute(
             """
             INSERT INTO payments (
@@ -86,7 +82,7 @@ def create_void_receipt(
         void_payment_ids.append(cursor.lastrowid)
         total_voided += reversed_amount
 
-    conn.execute(
+    receipt_cursor = conn.execute(
         """
         INSERT INTO receipts (
             receipt_no, student_id, total_paid, receipt_type,
@@ -95,13 +91,7 @@ def create_void_receipt(
         """,
         (void_receipt_no, original_receipt["student_id"], total_voided, now_str(), user_id),
     )
-    receipt_hash = compute_hash(
-        void_receipt_no, original_receipt["student_id"], total_voided, payment_date
-    )
-    conn.execute(
-        "INSERT INTO receipt_hashes (receipt_no, sha256_hash, created_at) VALUES (?, ?, ?)",
-        (void_receipt_no, receipt_hash, now_str()),
-    )
+    sign_receipt(conn, receipt_cursor.lastrowid)
     log_action(
         conn,
         user_id,
