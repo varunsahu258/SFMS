@@ -11,7 +11,7 @@ import secrets
 import sqlite3
 from pathlib import Path
 
-from config import DB_PATH
+from config import DB_PATH, INTEGRITY_KEY_PATH
 from utils import now_str
 
 ENV_KEY = "SFMS_INTEGRITY_KEY"
@@ -40,18 +40,45 @@ def generate_integrity_key_file(filepath: str) -> str:
     return str(destination)
 
 
-def integrity_key() -> bytes:
-    """Read and validate the HMAC key exclusively from SFMS_INTEGRITY_KEY."""
-    value = os.environ.get(ENV_KEY, "").strip()
-    if not value:
-        raise RuntimeError(f"{ENV_KEY} is not configured.")
+def _decode_integrity_key(value: str, source: str) -> bytes:
     try:
-        key = base64.urlsafe_b64decode(value.encode("ascii"))
-    except Exception as exc:
-        raise RuntimeError(f"{ENV_KEY} must contain a base64-encoded 32-byte key.") from exc
+        key = base64.b64decode(value.encode("ascii"), altchars=b"-_", validate=True)
+    except (UnicodeEncodeError, ValueError) as exc:
+        raise RuntimeError(f"{source} must contain a base64-encoded 32-byte key.") from exc
     if len(key) < 32:
-        raise RuntimeError(f"{ENV_KEY} must decode to at least 32 bytes.")
+        raise RuntimeError(f"{source} must decode to at least 32 bytes.")
     return key
+
+
+def _load_or_create_integrity_key_file(path: Path) -> str:
+    """Return the persistent key, creating it atomically on first launch."""
+    path = path.expanduser().resolve()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        encoded = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii")
+        with path.open("x", encoding="ascii") as handle:
+            handle.write(encoded + "\n")
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+        return encoded
+    except FileExistsError:
+        try:
+            return path.read_text(encoding="ascii").strip()
+        except OSError as exc:
+            raise RuntimeError(f"Unable to read the SFMS integrity key file: {path}") from exc
+    except OSError as exc:
+        raise RuntimeError(f"Unable to create the SFMS integrity key file: {path}") from exc
+
+
+def integrity_key() -> bytes:
+    """Load the deployment override or a persistent key created on first launch."""
+    value = os.environ.get(ENV_KEY, "").strip()
+    if value:
+        return _decode_integrity_key(value, ENV_KEY)
+    value = _load_or_create_integrity_key_file(Path(INTEGRITY_KEY_PATH))
+    return _decode_integrity_key(value, str(INTEGRITY_KEY_PATH))
 
 
 def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
