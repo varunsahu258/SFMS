@@ -232,6 +232,13 @@ def migration_v007_remove_oauth_token_setting(conn: sqlite3.Connection) -> None:
     )
 
 
+def migration_v008_receipt_sequence(conn: sqlite3.Connection) -> None:
+    """Create and seed the serialized receipt-number sequence."""
+    from utils import ensure_receipt_sequence
+
+    ensure_receipt_sequence(conn)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     ("v001_base_settings", migration_v001_base_settings),
     ("v002_setup_defaults", migration_v002_setup_defaults),
@@ -240,6 +247,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     ("v005_immutability_controls", migration_v005_immutability_controls),
     ("v006_advance_and_backup_keys", migration_v006_advance_and_backup_keys),
     ("v007_remove_oauth_token_setting", migration_v007_remove_oauth_token_setting),
+    ("v008_receipt_sequence", migration_v008_receipt_sequence),
 )
 
 

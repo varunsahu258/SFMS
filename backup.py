@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import os
+import json
 import shutil
 import sqlite3
 import sys
@@ -17,6 +18,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
+from app_events import signal_backup_warning
 from audit import log_operational_event
 from config import BACKUPS_DIR, DB_PATH
 from notifications import backup_overdue
@@ -31,7 +33,20 @@ SALT_SIZE = 16
 NONCE_SIZE = 12
 DEK_SIZE = 32
 MAX_BACKUP_FILES = 30
+CONSECUTIVE_FAILURES_SETTING = "consecutive_backup_failures"
+LAST_SUCCESS_SETTING = "last_successful_backup_at"
 BACKUP_MAGIC = b"SFMSENC2"
+
+REQUIRED_TABLES = [
+    "users", "students", "fee_heads", "fee_structure", "payments", "receipts",
+    "settings", "audit_log", "receipt_hashes", "backups_log", "schema_migrations",
+]
+REQUIRED_TRIGGERS = [
+    "trg_payments_no_delete", "trg_payments_no_update", "trg_audit_no_delete",
+    "trg_audit_no_update", "trg_receipts_no_delete", "trg_hash_no_delete",
+    "trg_hash_no_update", "trg_receipts_restricted_update",
+]
+REQUIRED_INDEXES = ["sqlite_autoindex_users_1", "sqlite_autoindex_settings_1"]
 _UNLOCKED_DEK: bytes | None = None
 
 
@@ -112,6 +127,51 @@ def rotate_backup_password(conn: sqlite3.Connection, old_password: str, new_pass
     _set_setting(conn, WRAPPED_DEK_SETTING, base64.b64encode(wrapped).decode("ascii"))
     _UNLOCKED_DEK = dek
 
+
+
+def backup_status(conn: sqlite3.Connection) -> dict[str, str | int]:
+    """Return dashboard-friendly backup status details."""
+    return {
+        "last_successful_backup_at": _setting(conn, LAST_SUCCESS_SETTING, "Never"),
+        "consecutive_backup_failures": int(_setting(conn, CONSECUTIVE_FAILURES_SETTING, "0") or 0),
+    }
+
+
+def record_auto_backup_success(conn: sqlite3.Connection, backup_path: str | None) -> None:
+    """Reset failure state and audit a successful automatic backup."""
+    if not backup_path:
+        return
+    timestamp = now_str()
+    _set_setting(conn, CONSECUTIVE_FAILURES_SETTING, "0")
+    _set_setting(conn, LAST_SUCCESS_SETTING, timestamp)
+    log_operational_event(
+        "BACKUP_SUCCESS", None,
+        {"table": "backups_log", "record_id": backup_path, "succeeded_at": timestamp},
+        conn=conn,
+    )
+    conn.commit()
+
+
+def record_auto_backup_failure(conn: sqlite3.Connection, exc: Exception) -> int:
+    """Persist an automatic-backup failure and signal UI after repeated failures."""
+    attempted_at = now_str()
+    failures = int(_setting(conn, CONSECUTIVE_FAILURES_SETTING, "0") or 0) + 1
+    _set_setting(conn, CONSECUTIVE_FAILURES_SETTING, str(failures))
+    log_operational_event(
+        "BACKUP_FAILED", None,
+        {
+            "table": "backups_log",
+            "record_id": attempted_at,
+            "attempted_at": attempted_at,
+            "error_type": type(exc).__name__,
+            "error_message": str(exc)[:500],
+        },
+        conn=conn,
+    )
+    conn.commit()
+    if failures >= 3:
+        signal_backup_warning(failures)
+    return failures
 
 def _connection(conn=None):
     if conn is not None:
@@ -212,7 +272,10 @@ def _create_backup(conn: sqlite3.Connection, created_by, backup_type: str) -> st
         {"table": "backups_log", "record_id": final_path,
          "type": backup_type, "created_by": creator_name}, conn=conn,
     )
-    conn.commit()
+    if backup_type == "AUTO":
+        record_auto_backup_success(conn, final_path)
+    else:
+        conn.commit()
     _prune_backups()
     return final_path
 
@@ -228,6 +291,86 @@ def auto_backup(conn) -> str | None:
         return None
     return _create_backup(conn, "SYSTEM", "AUTO")
 
+
+
+def _names(conn: sqlite3.Connection, object_type: str) -> set[str]:
+    return {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type=?", (object_type,))}
+
+
+def validate_backup_for_restore(backup_path: str) -> tuple[bool, list[str]]:
+    """Validate a backup database thoroughly before it can replace the live DB."""
+    reasons: list[str] = []
+    path = Path(backup_path)
+    if not path.is_file():
+        return False, [f"Backup file does not exist: {backup_path}"]
+    uri = f"file:{path.resolve().as_posix()}?mode=ro"
+    try:
+        with sqlite3.connect(uri, uri=True) as conn:
+            conn.row_factory = sqlite3.Row
+            try:
+                integrity = conn.execute("PRAGMA integrity_check").fetchone()
+                if not integrity or str(integrity[0]).lower() != "ok":
+                    reasons.append(f"Integrity check failed: {integrity[0] if integrity else 'no result'}")
+            except sqlite3.Error as exc:
+                reasons.append(f"Integrity check failed: {exc}")
+            try:
+                fk_rows = conn.execute("PRAGMA foreign_key_check").fetchall()
+                if fk_rows:
+                    reasons.append(f"Foreign-key check failed: {len(fk_rows)} violation(s)")
+            except sqlite3.Error as exc:
+                reasons.append(f"Foreign-key check failed: {exc}")
+
+            tables = _names(conn, "table")
+            for table in REQUIRED_TABLES:
+                if table not in tables:
+                    reasons.append(f"Missing required table: {table}")
+            triggers = _names(conn, "trigger")
+            for trigger in REQUIRED_TRIGGERS:
+                if trigger not in triggers:
+                    reasons.append(f"Missing required trigger: {trigger}")
+            indexes = _names(conn, "index")
+            for index in REQUIRED_INDEXES:
+                if index not in indexes:
+                    reasons.append(f"Missing required index: {index}")
+
+            if "schema_migrations" in tables:
+                from migrations import MIGRATIONS
+
+                known = [migration_id for migration_id, _ in MIGRATIONS]
+                applied = [row[0] for row in conn.execute("SELECT migration_id FROM schema_migrations ORDER BY migration_id")]
+                unknown = [migration_id for migration_id in applied if migration_id not in known]
+                if unknown:
+                    reasons.append(f"Backup schema is newer than this application: {', '.join(unknown)}")
+                elif applied and applied != known[:len(applied)]:
+                    reasons.append("Schema migration history is not a valid upgrade path")
+            if "users" in tables:
+                admin = conn.execute("SELECT 1 FROM users WHERE role='ADMIN' LIMIT 1").fetchone()
+                if admin is None:
+                    reasons.append("Backup contains no ADMIN user")
+            if "settings" in tables:
+                rows = conn.execute("SELECT key,value FROM settings WHERE lower(key) LIKE '%key%' OR lower(key) LIKE '%token%' OR lower(key) LIKE '%secret%'").fetchall()
+                for row in rows:
+                    if str(row["value"] or "").startswith("$2b$"):
+                        reasons.append(f"Suspicious bcrypt hash stored in sensitive setting: {row['key']}")
+            if {"receipts", "receipt_hashes"}.issubset(tables):
+                try:
+                    from receipt_integrity import ALGORITHM, compute_receipt_hmac
+
+                    rows = conn.execute(
+                        "SELECT receipt_id,hmac_value,signed_fields_json,algorithm FROM receipt_hashes ORDER BY receipt_id LIMIT 20"
+                    ).fetchall()
+                    for row in rows:
+                        if row["algorithm"] != ALGORITHM:
+                            reasons.append(f"Receipt {row['receipt_id']} uses unsupported hash algorithm")
+                            continue
+                        expected = compute_receipt_hmac(json.loads(row["signed_fields_json"] or "{}"))
+                        if expected != row["hmac_value"]:
+                            reasons.append(f"Receipt HMAC mismatch for receipt_id {row['receipt_id']}")
+                except Exception as exc:
+                    reasons.append(f"Receipt HMAC spot-check failed: {exc}")
+    except sqlite3.Error as exc:
+        reasons.append(f"Unable to open backup database: {exc}")
+    return not reasons, reasons
 
 def preview_backup(db_filepath) -> dict:
     """Open a backup read-only and return safe summary counts and year labels."""
@@ -259,6 +402,13 @@ def restore_backup(backup_filepath, password=None) -> bool:
     else:
         database_path = selected
     try:
+        valid, validation_errors = validate_backup_for_restore(str(database_path))
+        if not valid:
+            messagebox.showerror(
+                "Restore Backup Validation Failed",
+                "The selected backup cannot be restored:\n\n" + "\n".join(validation_errors),
+            )
+            return False
         preview = preview_backup(database_path)
         message = (
             f"Backup date: {preview['backup_date']}\n"

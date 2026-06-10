@@ -9,6 +9,8 @@ from datetime import datetime, timedelta
 from functools import wraps
 from tkinter import messagebox
 
+from app_events import signal_session_timeout
+
 import bcrypt
 
 from audit import log_operational_event
@@ -220,7 +222,7 @@ def get_login_status(username: str) -> dict[str, int | str | None]:
 
 
 def check_timeout() -> None:
-    """Log out timed-out sessions, notify the user, and return to the login window."""
+    """Signal timed-out sessions without touching Tk from worker threads."""
     if CURRENT_SESSION is None:
         return
     with _connect() as conn:
@@ -230,8 +232,4 @@ def check_timeout() -> None:
         ).fetchone()
     timeout_minutes = int(row["value"]) if row and row["value"] else SESSION_TIMEOUT_DEFAULT
     if CURRENT_SESSION is not None and CURRENT_SESSION.is_timed_out(timeout_minutes):
-        logout()
-        messagebox.showinfo("Session timed out", "Your session has expired. Please log in again.")
-        from ui_login import LoginWindow
-
-        LoginWindow()
+        signal_session_timeout()
