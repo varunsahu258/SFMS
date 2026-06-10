@@ -23,7 +23,7 @@ def _connect() -> sqlite3.Connection:
 class ChequeManagementWindow(tk.Toplevel):
     """List pending cheques and permit audited terminal status changes."""
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("manage_cheques")
     def __init__(self, master=None):
         super().__init__(master)
         self.title("Cheque Management")
