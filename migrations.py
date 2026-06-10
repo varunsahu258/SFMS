@@ -6,9 +6,9 @@ import sqlite3
 from collections.abc import Callable
 
 from config import (
-    BACKUP_INTERVAL_DEFAULT, LOGO_PATH, SCHOOL_ADDRESS, SCHOOL_NAME,
+    BACKUP_INTERVAL_DEFAULT, LOGO_PATH, RECEIPT_ISSUER_NAME, SCHOOL_ADDRESS, SCHOOL_NAME,
     SESSION_TIMEOUT_DEFAULT, SETTING_BACKUP_INTERVAL_HOURS, SETTING_LOGO_PATH,
-    SETTING_SCHOOL_ADDRESS, SETTING_SCHOOL_NAME, SETTING_SESSION_TIMEOUT_MINUTES,
+    SETTING_RECEIPT_ISSUER_NAME, SETTING_SCHOOL_ADDRESS, SETTING_SCHOOL_NAME, SETTING_SESSION_TIMEOUT_MINUTES,
 )
 from utils import now_str
 
@@ -309,6 +309,12 @@ def migration_v010_accountant_permissions(conn: sqlite3.Connection) -> None:
     )
 
 
+def migration_v011_receipt_issuer_setting(conn: sqlite3.Connection) -> None:
+    """Add the configurable name printed beneath the receipt signature line."""
+    _setting(conn, SETTING_RECEIPT_ISSUER_NAME, RECEIPT_ISSUER_NAME)
+
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     ("v001_base_settings", migration_v001_base_settings),
     ("v002_setup_defaults", migration_v002_setup_defaults),
@@ -320,6 +326,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     ("v008_receipt_sequence", migration_v008_receipt_sequence),
     ("v009_class_section_and_student_details", migration_v009_class_section_and_student_details),
     ("v010_accountant_permissions", migration_v010_accountant_permissions),
+    ("v011_receipt_issuer_setting", migration_v011_receipt_issuer_setting),
 )
 
 

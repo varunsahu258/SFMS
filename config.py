@@ -21,10 +21,12 @@ DEFAULT_ADMIN_ACTIVE = 1
 
 SCHOOL_NAME = "Sanskriti Vidhya Mandir High School"
 SCHOOL_ADDRESS = "Bareli (Raisen) M.P."
+RECEIPT_ISSUER_NAME = "Sonali Sahu"
 LOGO_PATH = ""
 
 SETTING_SCHOOL_NAME = "school_name"
 SETTING_SCHOOL_ADDRESS = "school_address"
+SETTING_RECEIPT_ISSUER_NAME = "receipt_issuer_name"
 SETTING_LOGO_PATH = "logo_path"
 SETTING_SESSION_TIMEOUT_MINUTES = "session_timeout_minutes"
 SETTING_BACKUP_INTERVAL_HOURS = "backup_interval_hours"

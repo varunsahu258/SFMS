@@ -14,13 +14,12 @@ from config import DB_PATH, REPORTS_DIR, SPLASH_BG, SPLASH_FG
 from report_generator import (
     audit_export,
     cashflow_chart_report,
+    collection_report,
     classwise_dues_report,
-    daily_report,
     comparative_report,
     defaulter_report,
     discount_register_report,
     feehead_collection_report,
-    monthly_report,
     void_report,
     ytd_report,
 )
@@ -73,8 +72,8 @@ class ReportsWindow(tk.Toplevel):
         notebook = ttk.Notebook(self)
         notebook.pack(fill="both", expand=True, padx=12, pady=(0, 12))
 
-        self._build_daily_tab(self._tab(notebook, "Daily"))
-        self._build_monthly_tab(self._tab(notebook, "Monthly"))
+        self._build_daily_tab(self._tab(notebook, "Daily Report"))
+        self._build_collection_tab(self._tab(notebook, "Collections"))
         self._build_class_dues_tab(self._tab(notebook, "Class Dues"))
         self._build_defaulter_tab(self._tab(notebook, "Defaulter"))
         self._build_year_tab(self._tab(notebook, "YTD"), "Generate YTD PDF", ytd_report)
@@ -152,22 +151,114 @@ class ReportsWindow(tk.Toplevel):
             command=lambda: self._generate_pair(generator, args_getter(), True),
         ).pack(side="left", padx=5)
 
-    def _build_daily_tab(self, frame: tk.Frame) -> None:
-        """Build daily-report date controls."""
-        date_var = tk.StringVar(value=today_str())
-        holder = self._row(frame, "Date (DD-MM-YYYY)", 0)
-        ttk.Entry(holder, textvariable=date_var, width=28).pack(side="left")
-        ttk.Button(frame, text="Generate Daily PDF", command=lambda: self._generate(daily_report, date_var.get().strip())).grid(row=1, column=0, pady=18)
+    def _collection_mode_controls(self, frame: tk.Frame, row: int) -> dict[str, tk.BooleanVar]:
+        """Add the shared Cash, UPI, and Cheque report filters."""
+        mode_vars = {mode: tk.BooleanVar(value=True) for mode in ("CASH", "UPI", "CHEQUE")}
+        holder = self._row(frame, "Payment Modes", row)
+        for mode in ("CASH", "UPI", "CHEQUE"):
+            ttk.Checkbutton(holder, text=mode.title(), variable=mode_vars[mode]).pack(side="left", padx=(0, 12))
+        return mode_vars
 
-    def _build_monthly_tab(self, frame: tk.Frame) -> None:
-        """Build monthly-report year and month controls."""
-        year_var = tk.StringVar(value=str(datetime.now().year))
-        month_var = tk.StringVar(value=MONTHS[datetime.now().month - 1])
-        year_holder = self._row(frame, "Calendar Year", 0)
-        ttk.Spinbox(year_holder, from_=2000, to=2100, textvariable=year_var, width=26).pack(side="left")
-        month_holder = self._row(frame, "Month", 1)
-        ttk.Combobox(month_holder, textvariable=month_var, values=MONTHS, state="readonly", width=25).pack(side="left")
-        ttk.Button(frame, text="Generate Monthly PDF", command=lambda: self._generate(monthly_report, int(year_var.get()), MONTHS.index(month_var.get()) + 1)).grid(row=2, column=0, pady=18)
+    @staticmethod
+    def _selected_modes(mode_vars: dict[str, tk.BooleanVar]) -> tuple[str, ...]:
+        """Return the payment modes selected in a report tab."""
+        return tuple(mode for mode, variable in mode_vars.items() if variable.get())
+
+    def _build_daily_tab(self, frame: tk.Frame) -> None:
+        """Restore the dedicated clean daily collection report tab."""
+        report_date = tk.StringVar(value=today_str())
+        recipient = tk.StringVar()
+        date_holder = self._row(frame, "Report Date (DD-MM-YYYY)", 0)
+        ttk.Entry(date_holder, textvariable=report_date, width=28).pack(side="left")
+        mode_vars = self._collection_mode_controls(frame, 1)
+        recipient_holder = self._row(frame, "Person Collecting Report", 2)
+        ttk.Entry(recipient_holder, textvariable=recipient, width=72).pack(side="left")
+        tk.Label(
+            frame,
+            text="Enter the full name/designation and school of the person receiving the report.",
+            bg=SPLASH_BG, fg=SPLASH_FG, anchor="w",
+        ).grid(row=3, column=0, sticky="w", pady=(4, 0))
+        ttk.Button(
+            frame,
+            text="Generate Daily Report PDF",
+            command=lambda: self._generate(
+                collection_report,
+                report_date.get().strip(), report_date.get().strip(), self._selected_modes(mode_vars),
+                True, False, False, False, recipient.get().strip(), "DAILY",
+            ),
+        ).grid(row=4, column=0, pady=18)
+
+    def _build_collection_tab(self, frame: tk.Frame) -> None:
+        """Build Today, since-last-report, and custom collection controls."""
+        report_type = tk.StringVar(value="DAILY")
+        from_var = tk.StringVar(value=today_str())
+        to_var = tk.StringVar(value=today_str())
+        recipient_var = tk.StringVar()
+        include_vars = {
+            "date": tk.BooleanVar(value=True),
+            "receipt": tk.BooleanVar(value=False),
+            "mode": tk.BooleanVar(value=False),
+            "collector": tk.BooleanVar(value=False),
+        }
+
+        type_holder = self._row(frame, "Report Type", 0)
+        for value, text in (
+            ("DAILY", "Today's Report"),
+            ("SINCE_LAST", "Transactions After Last Report"),
+            ("CUSTOM", "Custom Date Range"),
+        ):
+            ttk.Radiobutton(type_holder, text=text, value=value, variable=report_type).pack(side="left", padx=(0, 14))
+
+        from_holder = self._row(frame, "From Date (DD-MM-YYYY)", 1)
+        from_entry = ttk.Entry(from_holder, textvariable=from_var, width=28)
+        from_entry.pack(side="left")
+        to_holder = self._row(frame, "To Date (DD-MM-YYYY)", 2)
+        to_entry = ttk.Entry(to_holder, textvariable=to_var, width=28)
+        to_entry.pack(side="left")
+        mode_vars = self._collection_mode_controls(frame, 3)
+
+        options = self._row(frame, "Optional Columns", 4)
+        for key, text in (("date", "Date"), ("receipt", "Receipt No."), ("mode", "Payment Mode"), ("collector", "Collected By Account")):
+            ttk.Checkbutton(options, text=text, variable=include_vars[key]).pack(side="left", padx=(0, 10))
+
+        recipient = self._row(frame, "Person Collecting Report", 5)
+        ttk.Entry(recipient, textvariable=recipient_var, width=72).pack(side="left")
+        tk.Label(
+            frame,
+            text=("Example: Mr. L.P. Sahu, Sanskriti Vidhya Mandir High School, Bareli. "
+                  "The logged-in account is recorded separately as the report generator."),
+            bg=SPLASH_BG, fg=SPLASH_FG, anchor="w",
+        ).grid(row=6, column=0, sticky="w", pady=(4, 0))
+        tk.Label(
+            frame,
+            text="Every report always contains Student Name and Amount Collected; fee-head details are excluded.",
+            bg=SPLASH_BG, fg=SPLASH_FG, anchor="w",
+        ).grid(row=7, column=0, sticky="w", pady=(4, 0))
+
+        def update_date_state(*_args) -> None:
+            state = "normal" if report_type.get() == "CUSTOM" else "disabled"
+            from_entry.configure(state=state)
+            to_entry.configure(state=state)
+
+        report_type.trace_add("write", update_date_state)
+        update_date_state()
+
+        def generate() -> None:
+            kind = report_type.get()
+            if kind == "DAILY":
+                start = end = today_str()
+            elif kind == "SINCE_LAST":
+                start = end = ""
+            else:
+                start, end = from_var.get().strip(), to_var.get().strip()
+            self._generate(
+                collection_report, start, end, self._selected_modes(mode_vars),
+                include_vars["date"].get(), include_vars["receipt"].get(),
+                include_vars["mode"].get(), include_vars["collector"].get(),
+                recipient_var.get().strip(), kind,
+            )
+
+        ttk.Button(frame, text="Generate Collection PDF", command=generate).grid(row=8, column=0, pady=18)
 
     def _build_class_dues_tab(self, frame: tk.Frame) -> None:
         """Build class and academic-year controls for dues reports."""
