@@ -122,7 +122,10 @@ def login(username, password) -> tuple[bool, str]:
             log_action(conn, user["id"], LOGIN_FAIL_ACTION, USERS_TABLE, user["id"])
             return False, "Invalid password"
 
-        conn.execute("UPDATE users SET failed_attempts = 0, locked_at = NULL WHERE id = ?", (user["id"],))
+        conn.execute(
+            "UPDATE users SET failed_attempts = 0, locked_at = NULL, last_login = ? WHERE id = ?",
+            (now_str(), user["id"]),
+        )
         login_time = datetime.now()
         CURRENT_SESSION = Session(
             token=str(uuid.uuid4()),

@@ -61,7 +61,8 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             role TEXT CHECK(role IN ('{ROLE_ADMIN}','{ROLE_ACCOUNTANT}')),
             is_active INTEGER DEFAULT 1,
             failed_attempts INTEGER DEFAULT 0,
-            locked_at TEXT
+            locked_at TEXT,
+            last_login TEXT
         );
 
         CREATE TABLE IF NOT EXISTS students (
@@ -344,6 +345,9 @@ def init_db() -> None:
         _create_tables(conn)
         _create_triggers(conn)
         _seed_first_run(conn)
-        run_migrations(conn)
+        # Install structural migrations first. Immutability controls are installed
+        # only after legacy rows have been normalized by their migrations.
+        run_migrations(conn, through="v004_receipt_print_tracking")
         migrate_payment_controls(conn)
         migrate_legacy_ledger(conn)
+        run_migrations(conn)

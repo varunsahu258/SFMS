@@ -10,6 +10,7 @@ import auth
 from audit import log_action
 from config import SPLASH_BG, SPLASH_FG
 from ledger import active_academic_year, allocate_payment, ensure_student_charges
+from money import OverpaymentError, max_payment_amount, validate_payment_amount
 from receipt_integrity import sign_receipt
 from ui_collection_common import connect_db, require_session, search_students
 from utils import generate_receipt_no, now_str, today_str
@@ -100,14 +101,6 @@ class AdvancePaymentWindow(tk.Toplevel):
         auth.touch_session()
         if self.selected_student_id is None or not require_session():
             return
-        try:
-            amount = float(self.amount_var.get())
-        except ValueError:
-            messagebox.showerror("Validation", "Amount must be numeric.")
-            return
-        if amount <= 0:
-            messagebox.showerror("Validation", "Amount must be greater than zero.")
-            return
         option = self.charge_options.get(self.fee_head_var.get())
         if option is None:
             messagebox.showerror("Validation", "Select a fee head and term.")
@@ -117,10 +110,18 @@ class AdvancePaymentWindow(tk.Toplevel):
         if self.term_var.get() != str(option["due_date"] or ""):
             messagebox.showerror("Validation", "The selected term does not match the selected charge.")
             return
-        if amount > float(option["balance"] or 0) + 0.005:
-            messagebox.showerror("Validation", "Advance cannot exceed the selected future charge balance.")
-            return
         with connect_db() as conn:
+            try:
+                amount = validate_payment_amount(
+                    self.amount_var.get(), option["balance"],
+                    maximum=max_payment_amount(conn),
+                )
+            except OverpaymentError as exc:
+                messagebox.showerror("Overpayment", str(exc), parent=self)
+                return
+            except ValueError as exc:
+                messagebox.showerror("Validation", str(exc), parent=self)
+                return
             receipt_no = generate_receipt_no(conn)
             payment_date = today_str()
             payment_hash = ""
@@ -131,15 +132,15 @@ class AdvancePaymentWindow(tk.Toplevel):
                     payment_date, collected_by, payment_mode, note, hash
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'CASH', 'ADVANCE', ?)
                 """,
-                (self.selected_student_id, receipt_no, fee_head_id, 0, amount, 0, payment_date, auth.CURRENT_SESSION.user_id, payment_hash),
+                (self.selected_student_id, receipt_no, fee_head_id, 0, str(amount), 0, payment_date, auth.CURRENT_SESSION.user_id, payment_hash),
             )
-            allocate_payment(conn, cursor.lastrowid, charge_id, amount, "ADVANCE")
+            allocate_payment(conn, cursor.lastrowid, charge_id, str(amount), "ADVANCE")
             receipt_cursor = conn.execute(
                 """
                 INSERT INTO receipts (receipt_no, student_id, total_paid, receipt_type, printed_at, printed_by, reprint_count)
                 VALUES (?, ?, ?, 'ADVANCE', ?, ?, 0)
                 """,
-                (receipt_no, self.selected_student_id, amount, now_str(), auth.CURRENT_SESSION.user_id),
+                (receipt_no, self.selected_student_id, str(amount), now_str(), auth.CURRENT_SESSION.user_id),
             )
             sign_receipt(conn, receipt_cursor.lastrowid)
             log_action(

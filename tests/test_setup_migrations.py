@@ -21,7 +21,7 @@ def test_existing_accountant_does_not_open_setup_wizard():
         INSERT INTO users VALUES(1,'accountant','ACCOUNTANT',1);
         """
     )
-    run_migrations(conn)
+    run_migrations(conn, through="v004_receipt_print_tracking")
     assert conn.execute("SELECT value FROM settings WHERE key='setup_complete'").fetchone()[0] == "0"
     assert conn.execute("SELECT value FROM settings WHERE key='ui_theme'").fetchone()[0] == "default"
     assert should_show_setup(conn, "ACCOUNTANT", 1) is False

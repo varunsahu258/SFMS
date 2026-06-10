@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from decimal import Decimal, InvalidOperation
 import tkinter as tk
 from tkinter import messagebox, ttk
 
@@ -11,6 +12,7 @@ import auth
 from audit import log_action
 from config import DB_PATH, SPLASH_BG, SPLASH_FG
 from ledger import active_academic_year, allocate_payment, charge_rows
+from money import OverpaymentError, max_payment_amount, validate_payment_amount
 from payment_controls import normalize_reference
 from receipt_integrity import sign_receipt
 from receipt_printing import PrintFailureDialog, print_committed_receipt
@@ -270,29 +272,38 @@ class CollectionBaseWindow(tk.Toplevel):
 
     def update_summary(self) -> None:
         """Update the total summary label from amount entry values."""
-        total = 0.0
-        for charge_id, amount_var in self.amount_vars.items():
+        total = Decimal("0")
+        for amount_var in self.amount_vars.values():
             try:
-                total += float(amount_var.get() or 0)
-            except ValueError:
+                value = Decimal((amount_var.get() or "0").strip())
+                if value.is_finite():
+                    total += value
+            except (InvalidOperation, ValueError):
                 continue
         self.summary_var.set(f"Total paying: {format_currency(total)}")
 
     def _payable_items(self) -> list[dict]:
         """Return fee items with parsed positive payment amounts."""
         payable = []
+        with connect_db() as conn:
+            maximum = max_payment_amount(conn)
         for item in self.fee_items:
             if item["is_exempt"]:
                 continue
+            raw_amount = (self.amount_vars[item["charge_id"]].get() or "0").strip()
             try:
-                amount = float(self.amount_vars[item["charge_id"]].get() or 0)
-            except ValueError as exc:
-                raise ValueError("Amount paying must be numeric.") from exc
-            if amount > 0:
-                item = dict(item)
-                item["amount_paying"] = amount
-                item["mode"] = MODE_TO_DB[self.mode_vars[item["charge_id"]].get()]
-                payable.append(item)
+                candidate = Decimal(raw_amount)
+            except InvalidOperation as exc:
+                raise ValueError("Amount paying must be a valid number.") from exc
+            if candidate == 0:
+                continue
+            amount = validate_payment_amount(
+                raw_amount, item["amount_due"], maximum=maximum
+            )
+            item = dict(item)
+            item["amount_paying"] = amount
+            item["mode"] = MODE_TO_DB[self.mode_vars[item["charge_id"]].get()]
+            payable.append(item)
         return payable
 
     def _validate_payable(self, payable: list[dict]) -> bool:
@@ -319,6 +330,9 @@ class CollectionBaseWindow(tk.Toplevel):
             return
         try:
             payable = self._payable_items()
+        except OverpaymentError as exc:
+            messagebox.showerror("Overpayment", f"{exc} Use Advance Payment for future fees.")
+            return
         except ValueError as exc:
             messagebox.showerror("Validation", str(exc))
             return
@@ -332,8 +346,8 @@ class CollectionBaseWindow(tk.Toplevel):
             payment_date = today_str()
             payment_ids = []
             for item in payable:
-                amount_due = float(item["amount_due"])
-                amount_paid = float(item["amount_paying"])
+                amount_due = str(Decimal(str(item["amount_due"])))
+                amount_paid = str(item["amount_paying"])
                 # Legacy payments.balance is not authoritative; charge_ledger derives outstanding.
                 balance = 0.0
                 payment_hash = ""

@@ -180,7 +180,11 @@ class MandatoryPasswordChangeDialog(tk.Toplevel):
         user_id = auth.CURRENT_SESSION.user_id
         with _connect() as conn:
             conn.execute("UPDATE users SET password_hash=? WHERE id=?", (_password_hash(password), user_id))
-            conn.execute("DELETE FROM settings WHERE key=?", (f"{FORCE_CHANGE_PREFIX}{user_id}",))
+            conn.execute(
+                "INSERT INTO settings(key,value) VALUES(?,'0') "
+                "ON CONFLICT(key) DO UPDATE SET value='0'",
+                (f"{FORCE_CHANGE_PREFIX}{user_id}",),
+            )
             log_action(conn, user_id, "PASSWORD_CHANGE", "users", user_id, None, "first-login password changed")
         self.grab_release()
         self.destroy()
