@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from decimal import Decimal, InvalidOperation
 import tkinter as tk
 from tkinter import messagebox, ttk
 
 import auth
-from audit import log_action
 from config import DB_PATH, SPLASH_BG, SPLASH_FG
-from receipt_printer import print_receipt
-from utils import compute_hash, format_currency, generate_receipt_no, now_str, today_str
+from ledger import active_academic_year, charge_rows
+from money import OverpaymentError, max_payment_amount, validate_payment_amount
+from payment_controls import normalize_reference
+from receipt_printing import PrintFailureDialog, print_committed_receipt
+from financial_operations import record_collection
+from utils import format_currency
 
 PAYMENT_MODES = ("CASH", "CHEQUE", "UPI")
 MODE_LABELS = ("Cash", "Cheque", "UPI")
@@ -36,12 +40,6 @@ def require_session() -> bool:
     return True
 
 
-def active_academic_year(conn: sqlite3.Connection) -> str:
-    """Return the active academic-year label."""
-    row = conn.execute("SELECT label FROM academic_years WHERE is_active = 1 LIMIT 1").fetchone()
-    return row["label"] if row else ""
-
-
 def search_students(term: str) -> list[sqlite3.Row]:
     """Search active students by name or Aadhaar."""
     with connect_db() as conn:
@@ -61,79 +59,33 @@ def student_by_id(conn: sqlite3.Connection, student_id: int) -> sqlite3.Row:
     return conn.execute("SELECT * FROM students WHERE id = ?", (student_id,)).fetchone()
 
 
-def load_exempt_head_ids(conn: sqlite3.Connection, student_id: int, academic_year: str) -> set[int]:
-    """Return fee-head ids exempted for a student and year."""
-    exempt_ids: set[int] = set()
-    rows = conn.execute(
-        "SELECT fee_head_ids FROM exemptions WHERE student_id = ? AND academic_year = ?",
-        (student_id, academic_year),
-    ).fetchall()
-    for row in rows:
-        try:
-            exempt_ids.update(int(value) for value in json.loads(row["fee_head_ids"] or "[]"))
-        except (TypeError, ValueError, json.JSONDecodeError):
-            continue
-    return exempt_ids
-
-
-def discount_for_head(conn: sqlite3.Connection, student_id: int, fee_head_id: int) -> float:
-    """Return total discount amount for one student and fee head."""
-    row = conn.execute(
-        "SELECT COALESCE(SUM(amount), 0) AS discount_amount FROM discounts WHERE student_id = ? AND fee_head_id = ?",
-        (student_id, fee_head_id),
-    ).fetchone()
-    return float(row["discount_amount"] or 0)
-
-
-def previous_balance(conn: sqlite3.Connection, student_id: int, fee_head_id: int) -> float:
-    """Return cumulative prior balance or credit for a student fee head."""
-    row = conn.execute(
-        "SELECT COALESCE(SUM(balance), 0) AS balance FROM payments WHERE student_id = ? AND fee_head_id = ?",
-        (student_id, fee_head_id),
-    ).fetchone()
-    return float(row["balance"] or 0)
-
-
 def fee_rows(conn: sqlite3.Connection, student_id: int, register_types: tuple[str, ...], force_exemptions: bool = False) -> list[dict]:
-    """Build payable fee rows for the selected student and register type set."""
-    year = active_academic_year(conn)
-    student = student_by_id(conn, student_id)
-    exempt_ids = load_exempt_head_ids(conn, student_id, year) if force_exemptions else load_exempt_head_ids(conn, student_id, year)
-    rows = conn.execute(
-        f"""
-        SELECT fh.id AS fee_head_id, fh.name, fs.amount, fs.due_date, fh.register_type
-        FROM fee_structure fs
-        JOIN fee_heads fh ON fh.id = fs.fee_head_id
-        WHERE fs.academic_year = ? AND fs.class = ? AND fh.is_active = 1
-          AND fh.register_type IN ({','.join('?' for _ in register_types)})
-        ORDER BY fh.name
-        """,
-        (year, student["class"], *register_types),
-    ).fetchall()
+    """Build payable rows from academic-year-specific immutable charges."""
+    rows = charge_rows(conn, student_id, active_academic_year(conn), register_types)
     result = []
     for row in rows:
-        base_due = float(row["amount"] or 0)
-        prior = previous_balance(conn, student_id, row["fee_head_id"])
-        discount = discount_for_head(conn, student_id, row["fee_head_id"])
-        is_exempt = row["fee_head_id"] in exempt_ids
-        net_due = 0.0 if is_exempt else base_due + prior - discount
-        paying = 0.0 if is_exempt else max(0.0, net_due)
-        result.append(
-            {
-                "fee_head_id": row["fee_head_id"],
-                "name": row["name"],
-                "amount_due": net_due,
-                "base_due": base_due,
-                "previous_balance": prior,
-                "discount": discount,
-                "amount_paying": paying,
-                "mode": "Cash",
-                "note": "EXEMPT" if is_exempt else "",
-                "cheque_no": "",
-                "bank": "",
-                "is_exempt": is_exempt,
-            }
-        )
+        balance = float(row["balance"] or 0)
+        adjustments = float(row["adjustments"] or 0)
+        is_exempt = adjustments >= float(row["original_amount"] or 0) and balance <= 0
+        result.append({
+            "charge_id": int(row["charge_id"]),
+            "fee_head_id": int(row["fee_head_id"]),
+            "academic_year": row["academic_year"],
+            "due_date": row["due_date"],
+            "name": row["fee_head"],
+            "amount_due": balance,
+            "base_due": float(row["original_amount"] or 0),
+            "paid": float(row["paid"] or 0),
+            "adjustments": adjustments,
+            "previous_balance": 0.0,
+            "discount": adjustments,
+            "amount_paying": max(0.0, balance),
+            "mode": "Cash",
+            "note": "EXEMPT" if is_exempt else "",
+            "cheque_no": "",
+            "bank": "",
+            "is_exempt": is_exempt,
+        })
     return result
 
 
@@ -168,7 +120,7 @@ class ChequeDetailDialog(tk.Toplevel):
         if not self.cheque_var.get().strip() or not self.bank_var.get().strip():
             messagebox.showerror("Cheque details", "Cheque number and bank are required.")
             return
-        self.result = {"cheque_no": self.cheque_var.get().strip(), "bank": self.bank_var.get().strip()}
+        self.result = {"cheque_no": normalize_reference(self.cheque_var.get()), "bank": self.bank_var.get().strip()}
         self.destroy()
 
 
@@ -200,7 +152,7 @@ class UPIDetailDialog(tk.Toplevel):
         if not self.ref_var.get().strip():
             messagebox.showerror("UPI details", "Transaction reference is required.")
             return
-        self.result = {"transaction_ref": self.ref_var.get().strip()}
+        self.result = {"transaction_ref": normalize_reference(self.ref_var.get())}
         self.destroy()
 
 
@@ -279,32 +231,32 @@ class CollectionBaseWindow(tk.Toplevel):
             self.fee_items = fee_rows(conn, self.selected_student_id, self.register_types, self.force_exemption_view)
         if self.max_rows is not None:
             self.fee_items = self.fee_items[: self.max_rows]
-        headers = ("Fee Head", "Amount Due", "Previous Balance", "Discount", "Amount Paying", "Mode", "Status")
+        headers = ("Fee Head", "Outstanding", "Paid", "Discount / Exemption", "Amount Paying", "Mode", "Status")
         for column, header in enumerate(headers):
             tk.Label(self.fee_frame, text=header, bg=SPLASH_BG, fg=SPLASH_FG, font=("Segoe UI", 10, "bold")).grid(row=0, column=column, sticky="ew", padx=4, pady=4)
         for row_index, item in enumerate(self.fee_items, start=1):
             amount_var = tk.StringVar(value=f"{item['amount_paying']:.2f}")
             mode_var = tk.StringVar(value=item["mode"])
-            self.amount_vars[item["fee_head_id"]] = amount_var
-            self.mode_vars[item["fee_head_id"]] = mode_var
+            self.amount_vars[item["charge_id"]] = amount_var
+            self.mode_vars[item["charge_id"]] = mode_var
             state = "disabled" if item["is_exempt"] else "normal"
             tk.Label(self.fee_frame, text=item["name"], bg=SPLASH_BG, fg=SPLASH_FG).grid(row=row_index, column=0, sticky="w", padx=4, pady=4)
             tk.Label(self.fee_frame, text=format_currency(item["amount_due"]), bg=SPLASH_BG, fg=SPLASH_FG).grid(row=row_index, column=1, padx=4, pady=4)
-            tk.Label(self.fee_frame, text=format_currency(item["previous_balance"]), bg=SPLASH_BG, fg=SPLASH_FG).grid(row=row_index, column=2, padx=4, pady=4)
+            tk.Label(self.fee_frame, text=format_currency(item["paid"]), bg=SPLASH_BG, fg=SPLASH_FG).grid(row=row_index, column=2, padx=4, pady=4)
             tk.Label(self.fee_frame, text=format_currency(item["discount"]), bg=SPLASH_BG, fg=SPLASH_FG).grid(row=row_index, column=3, padx=4, pady=4)
             ttk.Entry(self.fee_frame, textvariable=amount_var, state=state, width=12).grid(row=row_index, column=4, padx=4, pady=4)
             combo = ttk.Combobox(self.fee_frame, textvariable=mode_var, values=MODE_LABELS, state="readonly", width=10)
             combo.grid(row=row_index, column=5, padx=4, pady=4)
-            combo.bind("<<ComboboxSelected>>", lambda _event, fee_head_id=item["fee_head_id"]: self.capture_mode_detail(fee_head_id))
+            combo.bind("<<ComboboxSelected>>", lambda _event, charge_id=item["charge_id"]: self.capture_mode_detail(charge_id))
             status = "EXEMPT" if item["is_exempt"] else ""
             tk.Label(self.fee_frame, text=status, bg=SPLASH_BG, fg="#999999" if status else SPLASH_FG).grid(row=row_index, column=6, padx=4, pady=4)
         self.update_summary()
 
-    def capture_mode_detail(self, fee_head_id: int) -> None:
+    def capture_mode_detail(self, charge_id: int) -> None:
         """Open mode-specific detail dialogs for cheque or UPI entries."""
         auth.touch_session()
-        item = self._item_by_head(fee_head_id)
-        mode = self.mode_vars[fee_head_id].get()
+        item = self._item_by_charge(charge_id)
+        mode = self.mode_vars[charge_id].get()
         if mode == "Cheque":
             dialog = ChequeDetailDialog(self)
             if dialog.result:
@@ -314,35 +266,44 @@ class CollectionBaseWindow(tk.Toplevel):
             if dialog.result:
                 item["note"] = dialog.result["transaction_ref"]
 
-    def _item_by_head(self, fee_head_id: int) -> dict:
-        """Return the loaded fee item for a fee-head id."""
-        return next(item for item in self.fee_items if item["fee_head_id"] == fee_head_id)
+    def _item_by_charge(self, charge_id: int) -> dict:
+        """Return the loaded fee item for a student-charge id."""
+        return next(item for item in self.fee_items if item["charge_id"] == charge_id)
 
     def update_summary(self) -> None:
         """Update the total summary label from amount entry values."""
-        total = 0.0
-        for fee_head_id, amount_var in self.amount_vars.items():
+        total = Decimal("0")
+        for amount_var in self.amount_vars.values():
             try:
-                total += float(amount_var.get() or 0)
-            except ValueError:
+                value = Decimal((amount_var.get() or "0").strip())
+                if value.is_finite():
+                    total += value
+            except (InvalidOperation, ValueError):
                 continue
         self.summary_var.set(f"Total paying: {format_currency(total)}")
 
     def _payable_items(self) -> list[dict]:
         """Return fee items with parsed positive payment amounts."""
         payable = []
+        with connect_db() as conn:
+            maximum = max_payment_amount(conn)
         for item in self.fee_items:
             if item["is_exempt"]:
                 continue
+            raw_amount = (self.amount_vars[item["charge_id"]].get() or "0").strip()
             try:
-                amount = float(self.amount_vars[item["fee_head_id"]].get() or 0)
-            except ValueError as exc:
-                raise ValueError("Amount paying must be numeric.") from exc
-            if amount > 0:
-                item = dict(item)
-                item["amount_paying"] = amount
-                item["mode"] = MODE_TO_DB[self.mode_vars[item["fee_head_id"]].get()]
-                payable.append(item)
+                candidate = Decimal(raw_amount)
+            except InvalidOperation as exc:
+                raise ValueError("Amount paying must be a valid number.") from exc
+            if candidate == 0:
+                continue
+            amount = validate_payment_amount(
+                raw_amount, item["amount_due"], maximum=maximum
+            )
+            item = dict(item)
+            item["amount_paying"] = amount
+            item["mode"] = MODE_TO_DB[self.mode_vars[item["charge_id"]].get()]
+            payable.append(item)
         return payable
 
     def _validate_payable(self, payable: list[dict]) -> bool:
@@ -366,6 +327,9 @@ class CollectionBaseWindow(tk.Toplevel):
             return
         try:
             payable = self._payable_items()
+        except OverpaymentError as exc:
+            messagebox.showerror("Overpayment", f"{exc} Use Advance Payment for future fees.")
+            return
         except ValueError as exc:
             messagebox.showerror("Validation", str(exc))
             return
@@ -374,57 +338,20 @@ class CollectionBaseWindow(tk.Toplevel):
         total = sum(item["amount_paying"] for item in payable)
         if not messagebox.askyesno("Confirm collection", f"Collect {format_currency(total)}?"):
             return
-        with connect_db() as conn:
-            receipt_no = generate_receipt_no(conn)
-            payment_date = today_str()
-            payment_ids = []
-            for item in payable:
-                amount_due = float(item["amount_due"])
-                amount_paid = float(item["amount_paying"])
-                balance = amount_due - amount_paid
-                payment_hash = compute_hash(receipt_no, self.selected_student_id, amount_paid, payment_date)
-                cursor = conn.execute(
-                    """
-                    INSERT INTO payments (
-                        student_id, receipt_no, fee_head_id, amount_due, amount_paid, balance,
-                        payment_date, collected_by, payment_mode, note, hash
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        self.selected_student_id, receipt_no, item["fee_head_id"], amount_due, amount_paid, balance,
-                        payment_date, auth.CURRENT_SESSION.user_id, item["mode"], item.get("note", ""), payment_hash,
-                    ),
+        try:
+            with connect_db() as conn:
+                result = record_collection(
+                    conn, self.selected_student_id, self.receipt_type,
+                    auth.CURRENT_SESSION.user_id, payable,
                 )
-                payment_ids.append(cursor.lastrowid)
-                if item["mode"] == "CHEQUE":
-                    conn.execute(
-                        """
-                        INSERT INTO cheque_tracker (payment_id, cheque_no, bank, amount, collected_on, status, updated_at)
-                        VALUES (?, ?, ?, ?, ?, 'PENDING', ?)
-                        """,
-                        (cursor.lastrowid, item["cheque_no"], item["bank"], amount_paid, payment_date, now_str()),
-                    )
-            receipt_hash = compute_hash(receipt_no, self.selected_student_id, total, payment_date)
-            conn.execute(
-                """
-                INSERT INTO receipts (receipt_no, student_id, total_paid, receipt_type, printed_at, printed_by, reprint_count)
-                VALUES (?, ?, ?, ?, ?, ?, 0)
-                """,
-                (receipt_no, self.selected_student_id, total, self.receipt_type, now_str(), auth.CURRENT_SESSION.user_id),
-            )
-            conn.execute(
-                "INSERT INTO receipt_hashes (receipt_no, sha256_hash, created_at) VALUES (?, ?, ?)",
-                (receipt_no, receipt_hash, now_str()),
-            )
-            log_action(
-                conn,
-                auth.CURRENT_SESSION.user_id,
-                "PAYMENT_COLLECTED",
-                "payments",
-                receipt_no,
-                None,
-                json.dumps({"receipt_no": receipt_no, "payment_ids": payment_ids, "total_paid": total}, default=str),
-            )
-            print_receipt(conn, receipt_no)
+        except Exception as exc:
+            messagebox.showerror("Collection", str(exc), parent=self)
+            return
+        receipt_no = result["receipt_no"]
+        committed_receipt_id = result["receipt_id"]
+        try:
+            print_committed_receipt(committed_receipt_id, receipt_no)
+        except Exception as exc:
+            PrintFailureDialog(self, committed_receipt_id, receipt_no, exc)
         messagebox.showinfo("Payment collected", f"Payment collected successfully. Receipt No: {receipt_no}")
         self.load_dues()

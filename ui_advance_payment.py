@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-import json
 import tkinter as tk
 from tkinter import messagebox, ttk
 
 import auth
-from audit import log_action
 from config import SPLASH_BG, SPLASH_FG
-from ui_collection_common import active_academic_year, connect_db, require_session, search_students
-from utils import compute_hash, generate_receipt_no, now_str, today_str
+from ledger import active_academic_year, ensure_student_charges
+from money import OverpaymentError, max_payment_amount, validate_payment_amount
+from receipt_printing import PrintFailureDialog, print_committed_receipt
+from ui_collection_common import connect_db, require_session, search_students
+from financial_operations import record_advance_payment
 
 
 class AdvancePaymentWindow(tk.Toplevel):
@@ -73,18 +74,22 @@ class AdvancePaymentWindow(tk.Toplevel):
         with connect_db() as conn:
             student = conn.execute("SELECT class FROM students WHERE id = ?", (self.selected_student_id,)).fetchone()
             year = active_academic_year(conn)
+            ensure_student_charges(conn, year, self.selected_student_id)
             rows = conn.execute(
                 """
-                SELECT fs.fee_head_id, fh.name, fs.due_date
-                FROM fee_structure fs
-                JOIN fee_heads fh ON fh.id = fs.fee_head_id
-                WHERE fs.academic_year = ? AND fs.class = ? AND fs.due_date IS NOT NULL AND fs.due_date <> ''
-                ORDER BY fs.due_date, fh.name
+                SELECT l.charge_id, l.fee_head_id, fh.name, l.due_date, l.balance,
+                       ay.id AS academic_year_id, ay.label AS academic_year
+                FROM charge_ledger l
+                JOIN academic_years ay ON ay.label=l.academic_year JOIN fee_heads fh ON fh.id=l.fee_head_id
+                WHERE l.student_id=? AND l.academic_year=? AND l.due_date IS NOT NULL
+                      AND l.due_date<>'' AND l.balance>0
+                ORDER BY l.due_date, fh.name
                 """,
-                (year, student["class"]),
+                (self.selected_student_id, year),
             ).fetchall()
-        self.fee_head_ids = {f"{row['name']} ({row['due_date']})": row["fee_head_id"] for row in rows}
-        labels = list(self.fee_head_ids)
+        self.charge_options = {f"{row['name']} ({row['due_date']})": dict(row) for row in rows}
+        self.fee_head_ids = {label: row["fee_head_id"] for label, row in self.charge_options.items()}
+        labels = list(self.charge_options)
         self.fee_combo.configure(values=labels)
         self.term_combo.configure(values=[row["due_date"] for row in rows])
         if labels:
@@ -92,54 +97,44 @@ class AdvancePaymentWindow(tk.Toplevel):
             self.term_var.set(rows[0]["due_date"])
 
     def save(self) -> None:
-        """Insert an immutable advance payment with negative balance credit."""
+        """Insert an immutable, term-scoped advance payment and print its receipt."""
         auth.touch_session()
         if self.selected_student_id is None or not require_session():
             return
-        try:
-            amount = float(self.amount_var.get())
-        except ValueError:
-            messagebox.showerror("Validation", "Amount must be numeric.")
-            return
-        if amount <= 0:
-            messagebox.showerror("Validation", "Amount must be greater than zero.")
-            return
-        fee_head_id = self.fee_head_ids.get(self.fee_head_var.get())
-        if fee_head_id is None:
+        option = self.charge_options.get(self.fee_head_var.get())
+        if option is None:
             messagebox.showerror("Validation", "Select a fee head and term.")
             return
+        fee_head_id = option["fee_head_id"]
+        charge_id = option["charge_id"]
+        if self.term_var.get() != str(option["due_date"] or ""):
+            messagebox.showerror("Validation", "The selected term does not match the selected charge.")
+            return
         with connect_db() as conn:
-            receipt_no = generate_receipt_no(conn)
-            payment_date = today_str()
-            payment_hash = compute_hash(receipt_no, self.selected_student_id, amount, payment_date)
-            cursor = conn.execute(
-                """
-                INSERT INTO payments (
-                    student_id, receipt_no, fee_head_id, amount_due, amount_paid, balance,
-                    payment_date, collected_by, payment_mode, note, hash
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'CASH', 'ADVANCE', ?)
-                """,
-                (self.selected_student_id, receipt_no, fee_head_id, 0, amount, -amount, payment_date, auth.CURRENT_SESSION.user_id, payment_hash),
-            )
-            receipt_hash = compute_hash(receipt_no, self.selected_student_id, amount, payment_date)
-            conn.execute(
-                """
-                INSERT INTO receipts (receipt_no, student_id, total_paid, receipt_type, printed_at, printed_by, reprint_count)
-                VALUES (?, ?, ?, 'ADVANCE', ?, ?, 0)
-                """,
-                (receipt_no, self.selected_student_id, amount, now_str(), auth.CURRENT_SESSION.user_id),
-            )
-            conn.execute(
-                "INSERT INTO receipt_hashes (receipt_no, sha256_hash, created_at) VALUES (?, ?, ?)",
-                (receipt_no, receipt_hash, now_str()),
-            )
-            log_action(
-                conn,
-                auth.CURRENT_SESSION.user_id,
-                "ADVANCE_PAYMENT",
-                "payments",
-                cursor.lastrowid,
-                None,
-                json.dumps({"receipt_no": receipt_no, "amount": amount}, default=str),
-            )
+            try:
+                amount = validate_payment_amount(
+                    self.amount_var.get(), option["balance"],
+                    maximum=max_payment_amount(conn),
+                )
+            except OverpaymentError as exc:
+                messagebox.showerror("Overpayment", str(exc), parent=self)
+                return
+            except ValueError as exc:
+                messagebox.showerror("Validation", str(exc), parent=self)
+                return
+            try:
+                result = record_advance_payment(
+                    conn, self.selected_student_id, charge_id, fee_head_id, amount,
+                    option["academic_year_id"], option["academic_year"],
+                    str(option["due_date"]), auth.CURRENT_SESSION.user_id,
+                )
+            except Exception as exc:
+                messagebox.showerror("Advance payment", str(exc), parent=self)
+                return
+            receipt_no = result["receipt_no"]
+            committed_receipt_id = result["receipt_id"]
+        try:
+            print_committed_receipt(committed_receipt_id, receipt_no)
+        except Exception as exc:
+            PrintFailureDialog(self, committed_receipt_id, receipt_no, exc)
         messagebox.showinfo("Advance payment", f"Advance payment saved. Receipt No: {receipt_no}")

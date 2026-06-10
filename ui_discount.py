@@ -6,7 +6,10 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 import auth
+from audit import log_financial_action
 from config import SPLASH_BG, SPLASH_FG
+from ledger import active_academic_year, add_adjustment, ensure_student_charges
+from money import OverpaymentError, max_payment_amount, validate_payment_amount
 from ui_collection_common import connect_db, search_students
 from utils import now_str
 
@@ -79,18 +82,48 @@ class DiscountWindow(tk.Toplevel):
         if self.selected_student_id is None:
             messagebox.showerror("Validation", "Select a student.")
             return
-        try:
-            amount = float(self.amount_var.get())
-        except ValueError:
-            messagebox.showerror("Validation", "Amount must be numeric.")
-            return
         fee_head_id = self.fee_head_ids.get(self.fee_head_var.get())
-        if fee_head_id is None or amount <= 0 or not self.reason_var.get().strip():
-            messagebox.showerror("Validation", "Fee head, positive amount, and reason are required.")
+        if fee_head_id is None or not self.reason_var.get().strip():
+            messagebox.showerror("Validation", "Fee head, amount, and reason are required.")
             return
         with connect_db() as conn:
-            conn.execute(
-                "INSERT INTO discounts (student_id, fee_head_id, amount, reason, approved_by, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (self.selected_student_id, fee_head_id, amount, self.reason_var.get().strip(), auth.CURRENT_SESSION.user_id, now_str()),
+            year = active_academic_year(conn)
+            ensure_student_charges(conn, year, self.selected_student_id)
+            charges = conn.execute(
+                "SELECT charge_id,balance,due_date FROM charge_ledger WHERE student_id=? AND academic_year=? AND fee_head_id=? AND status<>'CANCELLED' AND balance>0 ORDER BY due_date,charge_id",
+                (self.selected_student_id, year, fee_head_id),
+            ).fetchall()
+            if not charges:
+                messagebox.showerror("Discount", "No outstanding charge exists for this fee head in the active academic year.", parent=self)
+                return
+            if len(charges) != 1:
+                messagebox.showerror(
+                    "Discount",
+                    "This fee head has multiple term charges. Apply the discount from a charge-specific workflow; no charge was changed.",
+                    parent=self,
+                )
+                return
+            charge = charges[0]
+            try:
+                amount = validate_payment_amount(
+                    self.amount_var.get(), charge["balance"],
+                    maximum=max_payment_amount(conn),
+                )
+            except OverpaymentError as exc:
+                messagebox.showerror("Discount", str(exc), parent=self)
+                return
+            except ValueError as exc:
+                messagebox.showerror("Validation", str(exc), parent=self)
+                return
+            cursor = conn.execute(
+                "INSERT INTO discounts (student_id, fee_head_id, amount, reason, approved_by, created_at, academic_year, charge_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (self.selected_student_id, fee_head_id, str(amount), self.reason_var.get().strip(), auth.CURRENT_SESSION.user_id, now_str(), year, charge["charge_id"]),
+            )
+            add_adjustment(conn, charge["charge_id"], "DISCOUNT", str(amount), "discounts", cursor.lastrowid, self.reason_var.get().strip(), auth.CURRENT_SESSION.user_id)
+            log_financial_action(
+                conn, "DISCOUNT_APPLIED", auth.CURRENT_SESSION.user_id,
+                {"table": "discounts", "record_id": cursor.lastrowid,
+                 "student_id": self.selected_student_id, "charge_id": charge["charge_id"],
+                 "amount": str(amount), "reason": self.reason_var.get().strip()},
             )
         messagebox.showinfo("Discount", "Discount saved.")

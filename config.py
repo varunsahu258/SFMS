@@ -1,11 +1,14 @@
 """Application-wide constants for the SFMS desktop application."""
 
-import os
+from pathlib import Path
 
-DB_PATH = "fees_data.db"
-RECEIPTS_DIR = "receipts/"
-REPORTS_DIR = "reports/"
-BACKUPS_DIR = "backups/"
+from data_paths import apply_restrictive_acl, get_app_data_dir
+
+BASE_DIR = get_app_data_dir()
+DB_PATH = BASE_DIR / "fees_data.db"
+RECEIPTS_DIR = BASE_DIR / "receipts"
+REPORTS_DIR = BASE_DIR / "reports"
+BACKUPS_DIR = BASE_DIR / "backups"
 APP_VERSION = "2.0"
 SESSION_TIMEOUT_DEFAULT = 15  # minutes
 BACKUP_INTERVAL_DEFAULT = 6  # hours
@@ -60,4 +63,6 @@ TRG_HASH_DELETE_MSG = "receipt hashes cannot be deleted"
 TRG_HASH_UPDATE_MSG = "receipt hashes cannot be updated"
 
 for directory in (RECEIPTS_DIR, REPORTS_DIR, BACKUPS_DIR):
-    os.makedirs(directory, exist_ok=True)
+    Path(directory).mkdir(parents=True, exist_ok=True)
+
+apply_restrictive_acl(BASE_DIR)
