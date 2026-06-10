@@ -24,7 +24,7 @@ def _connect() -> sqlite3.Connection:
 class ReprintWindow(tk.Toplevel):
     """Search receipt history and generate a reason-backed duplicate receipt."""
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("reprint_receipts")
     def __init__(self, master=None):
         """Create the receipt search and reprint interface."""
         super().__init__(master)
@@ -140,7 +140,7 @@ class ReprintWindow(tk.Toplevel):
         self.details.insert("1.0", "\n".join(lines))
         self.details.configure(state="disabled")
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("reprint_receipts")
     def reprint(self) -> None:
         """Require a reason, print a duplicate, and audit the stated reason."""
         auth.touch_session()
