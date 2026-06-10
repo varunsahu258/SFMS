@@ -49,10 +49,45 @@ def migration_v003_receipt_hmac(conn: sqlite3.Connection) -> None:
     install_receipt_hmac_schema(conn)
 
 
+def migration_v004_receipt_print_tracking(conn: sqlite3.Connection) -> None:
+    """Add immutable print history and durable post-commit failure records."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS receipt_print_history(
+            id INTEGER PRIMARY KEY,
+            receipt_id INTEGER NOT NULL,
+            print_type TEXT NOT NULL CHECK(print_type IN ('ORIGINAL','REPRINT')),
+            filename TEXT NOT NULL UNIQUE,
+            file_sha256 TEXT NOT NULL,
+            printed_at TEXT NOT NULL,
+            printed_by INTEGER,
+            FOREIGN KEY(receipt_id) REFERENCES receipts(id),
+            FOREIGN KEY(printed_by) REFERENCES users(id)
+        );
+        CREATE TABLE IF NOT EXISTS receipt_print_failures(
+            id INTEGER PRIMARY KEY,
+            receipt_id INTEGER NOT NULL,
+            failed_at TEXT NOT NULL,
+            error_message TEXT NOT NULL,
+            FOREIGN KEY(receipt_id) REFERENCES receipts(id)
+        );
+        CREATE TRIGGER IF NOT EXISTS trg_print_history_no_update
+        BEFORE UPDATE ON receipt_print_history BEGIN
+            SELECT RAISE(ABORT,'receipt print history cannot be updated');
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_print_history_no_delete
+        BEFORE DELETE ON receipt_print_history BEGIN
+            SELECT RAISE(ABORT,'receipt print history cannot be deleted');
+        END;
+        """
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     ("v001_base_settings", migration_v001_base_settings),
     ("v002_setup_defaults", migration_v002_setup_defaults),
     ("v003_receipt_hmac", migration_v003_receipt_hmac),
+    ("v004_receipt_print_tracking", migration_v004_receipt_print_tracking),
 )
 
 

@@ -10,7 +10,7 @@ from tkinter import messagebox, ttk
 import auth
 from audit import log_action
 from config import DB_PATH, SPLASH_BG, SPLASH_FG
-from receipt_printer import print_receipt
+from receipt_printing import print_committed_receipt
 from utils import format_currency, now_str
 
 
@@ -157,11 +157,20 @@ class ReprintWindow(tk.Toplevel):
             return
         try:
             with _connect() as conn:
-                path = print_receipt(conn, self.selected_receipt_no, reprint=True)
+                receipt = conn.execute(
+                    "SELECT id FROM receipts WHERE receipt_no=?", (self.selected_receipt_no,)
+                ).fetchone()
+                if receipt is None:
+                    raise ValueError("Committed receipt was not found.")
+                receipt_id = int(receipt["id"])
+            path = print_committed_receipt(
+                receipt_id, self.selected_receipt_no, reprint=True
+            )
+            with _connect() as conn:
                 log_action(
                     conn,
                     auth.CURRENT_SESSION.user_id,
-                    "RECEIPT_REPRINT",
+                    "RECEIPT_REPRINT_REASON",
                     "receipts",
                     self.selected_receipt_no,
                     None,

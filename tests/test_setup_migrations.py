@@ -28,5 +28,6 @@ def test_existing_accountant_does_not_open_setup_wizard():
     assert conn.execute("SELECT COUNT(*) FROM audit_log WHERE action='SETUP_INCOMPLETE_NON_ADMIN_LOGIN'").fetchone()[0] == 1
     assert should_show_setup(conn, "ADMIN", 2) is True
     assert [row[0] for row in conn.execute("SELECT migration_id FROM schema_migrations ORDER BY migration_id")] == [
-        "v001_base_settings", "v002_setup_defaults", "v003_receipt_hmac"
+        "v001_base_settings", "v002_setup_defaults", "v003_receipt_hmac",
+        "v004_receipt_print_tracking"
     ]

@@ -13,7 +13,7 @@ from config import DB_PATH, SPLASH_BG, SPLASH_FG
 from ledger import active_academic_year, allocate_payment, charge_rows
 from payment_controls import normalize_reference
 from receipt_integrity import sign_receipt
-from receipt_printer import print_receipt
+from receipt_printing import PrintFailureDialog, print_committed_receipt
 from utils import format_currency, generate_receipt_no, now_str, today_str
 
 PAYMENT_MODES = ("CASH", "CHEQUE", "UPI")
@@ -380,6 +380,11 @@ class CollectionBaseWindow(tk.Toplevel):
                 None,
                 json.dumps({"receipt_no": receipt_no, "payment_ids": payment_ids, "total_paid": total}, default=str),
             )
-            print_receipt(conn, receipt_no)
+            conn.commit()
+            committed_receipt_id = int(receipt_cursor.lastrowid)
+        try:
+            print_committed_receipt(committed_receipt_id, receipt_no)
+        except Exception as exc:
+            PrintFailureDialog(self, committed_receipt_id, receipt_no, exc)
         messagebox.showinfo("Payment collected", f"Payment collected successfully. Receipt No: {receipt_no}")
         self.load_dues()
