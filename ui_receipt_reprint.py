@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-import json
 import sqlite3
 import tkinter as tk
 from tkinter import messagebox, ttk
 
 import auth
-from audit import log_action
 from config import DB_PATH, SPLASH_BG, SPLASH_FG
 from receipt_printing import print_committed_receipt
-from utils import format_currency, now_str
+from utils import format_currency
 
 
 def _connect() -> sqlite3.Connection:
@@ -164,18 +162,8 @@ class ReprintWindow(tk.Toplevel):
                     raise ValueError("Committed receipt was not found.")
                 receipt_id = int(receipt["id"])
             path = print_committed_receipt(
-                receipt_id, self.selected_receipt_no, reprint=True
+                receipt_id, self.selected_receipt_no, reprint=True, reprint_reason=reason
             )
-            with _connect() as conn:
-                log_action(
-                    conn,
-                    auth.CURRENT_SESSION.user_id,
-                    "RECEIPT_REPRINT_REASON",
-                    "receipts",
-                    self.selected_receipt_no,
-                    None,
-                    json.dumps({"reason": reason, "reprinted_at": now_str()}, default=str),
-                )
         except Exception as exc:
             messagebox.showerror("Receipt reprint", str(exc), parent=self)
             return

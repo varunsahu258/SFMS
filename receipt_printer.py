@@ -264,7 +264,7 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def print_receipt(conn, receipt_no, reprint=False):
+def print_receipt(conn, receipt_no, reprint=False, reprint_reason: str | None = None):
     """Generate one immutable receipt PDF and append its print-history record."""
     data = _receipt_data(conn, receipt_no)
     settings = _settings(conn)
@@ -331,8 +331,22 @@ def print_receipt(conn, receipt_no, reprint=False):
                            last_reprint_at=?,last_reprint_by=? WHERE id=?""",
                     (timestamp, user_id, receipt_id),
                 )
-                log_action(conn, user_id, "RECEIPT_REPRINT", "receipts", receipt_no, None,
-                           f"reprinted_at={timestamp};filename={target_path.name}")
+                updated = conn.execute(
+                    "SELECT reprint_count FROM receipts WHERE id=?", (receipt_id,)
+                ).fetchone()
+                reprint_count = int(updated[0] or 0) if updated else 0
+                log_action(
+                    conn, user_id, "RECEIPT_REPRINT", "receipts", receipt_id, None,
+                    {
+                        "receipt_id": receipt_id,
+                        "receipt_no": receipt_no,
+                        "reprint_count": reprint_count,
+                        "reprinted_by": user_id,
+                        "reprinted_at": timestamp,
+                        "reason": reprint_reason or "",
+                        "filename": target_path.name,
+                    },
+                )
             conn.commit()
         except Exception:
             conn.rollback()

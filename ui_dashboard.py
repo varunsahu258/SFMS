@@ -137,6 +137,16 @@ class DashboardWindow(tk.Toplevel):
         )
         self.cashflow_canvas.pack(fill="both", expand=True)
         self.cashflow_canvas.bind("<Configure>", self._draw_cashflow_chart)
+        self.backup_status_frame = tk.LabelFrame(
+            chart_frame, text="Backup Status", bg=self._sfms_palette["bg"], fg=self._sfms_palette["fg"], padx=10, pady=8
+        )
+        self.backup_status_frame.pack(fill="x", pady=(10, 0))
+        self.backup_status_var = tk.StringVar(value="Last successful backup: loading...")
+        tk.Label(
+            self.backup_status_frame, textvariable=self.backup_status_var, bg=self._sfms_palette["bg"],
+            fg=self._sfms_palette["fg"], justify="left", anchor="w"
+        ).pack(side="left", fill="x", expand=True)
+        ttk.Button(self.backup_status_frame, text="Backup Now", command=self._open_backup_window).pack(side="right")
         ttk.Button(button_frame, text=label("main_collection", self.language), command=self._on_main_collection_click).pack(fill="x", pady=5)
         ttk.Button(button_frame, text=label("small_collection", self.language), command=self._on_small_collection_click).pack(fill="x", pady=5)
         ttk.Button(button_frame, text=label("exemption_collection", self.language), command=self._on_exemption_collection_click).pack(fill="x", pady=5)
@@ -193,6 +203,9 @@ class DashboardWindow(tk.Toplevel):
                     conn.execute("PRAGMA journal_mode=WAL")
                     state = get_notification_state(conn)
                     cashflow_year, cashflow_values = load_cashflow_summary(conn)
+                    from backup import backup_status
+
+                    state["backup_status"] = backup_status(conn)
             except sqlite3.Error:
                 return
             try:
@@ -207,7 +220,25 @@ class DashboardWindow(tk.Toplevel):
         self.cashflow_year = year_label
         self.cashflow_values = values
         self._render_notifications(state)
+        self._render_backup_status(state.get("backup_status", {}))
         self._draw_cashflow_chart()
+
+    def _render_backup_status(self, status: dict) -> None:
+        """Render last successful backup and consecutive failure count."""
+        last_success = status.get("last_successful_backup_at") or "Never"
+        failures = int(status.get("consecutive_backup_failures") or 0)
+        text = f"Last successful backup: {last_success}"
+        if failures > 0:
+            text += f"\nConsecutive failures: {failures}"
+        self.backup_status_var.set(text)
+
+    def show_backup_failure_warning(self, failures: int) -> None:
+        """Show a non-dismissible repeated-backup-failure banner."""
+        self._banner_row(
+            0, "backup_failure", "#b00020",
+            f"Automatic backups have failed {failures} consecutive times — run Backup Now.",
+            "Backup Now", self._open_backup_window, dismissible=False,
+        )
 
     def _draw_cashflow_chart(self, _event=None) -> None:
         """Draw the active academic year's responsive monthly cashflow bars."""
@@ -272,14 +303,15 @@ class DashboardWindow(tk.Toplevel):
                 "Backup Now", self._open_backup_window,
             )
 
-    def _banner_row(self, row: int, key: str, color: str, text: str, action_text: str, action) -> None:
+    def _banner_row(self, row: int, key: str, color: str, text: str, action_text: str, action, dismissible: bool = True) -> None:
         """Create one fixed-height notification banner row."""
         banner = tk.Frame(self.notification_frame, bg=color, height=38)
         banner.pack(fill="x", pady=(0, 3))
         banner.pack_propagate(False)
         tk.Label(banner, text=text, bg=color, fg="white", font=("Segoe UI", 10, "bold"), anchor="w").pack(side="left", padx=10, fill="x", expand=True)
         ttk.Button(banner, text=action_text, command=action).pack(side="right", padx=4, pady=5)
-        ttk.Button(banner, text="X", width=3, command=lambda: self._dismiss_banner(key, banner)).pack(side="right", padx=(0, 6), pady=5)
+        if dismissible:
+            ttk.Button(banner, text="X", width=3, command=lambda: self._dismiss_banner(key, banner)).pack(side="right", padx=(0, 6), pady=5)
 
     def _dismiss_banner(self, key: str, banner: tk.Frame) -> None:
         """Dismiss a notification for this in-memory login session."""
