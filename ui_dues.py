@@ -3,29 +3,36 @@
 from __future__ import annotations
 
 from datetime import datetime
+import os
 import tkinter as tk
 from tkinter import messagebox, ttk
 
 import auth
 from config import SPLASH_BG, SPLASH_FG
-from ui_collection_common import active_academic_year, connect_db
+from ledger import active_academic_year, ensure_student_charges
+from ui_collection_common import connect_db
 from utils import format_currency, today_str
 
 
 class DuesWindow(tk.Toplevel):
     """Display student-wise or class-wide unpaid dues."""
 
-    def __init__(self, master=None):
-        """Create the dues window."""
+    def __init__(self, master=None, overdue_threshold: int | None = None):
+        """Create the dues window with an optional overdue-days filter."""
         super().__init__(master)
+        self.overdue_threshold = overdue_threshold
         self.title("Dues")
         self.geometry("980x560")
         self.configure(bg=SPLASH_BG)
         self.search_var = tk.StringVar()
         self.class_var = tk.StringVar()
         self.rows = []
+        self.row_students: dict[str, dict] = {}
         self._build_widgets()
         self._load_classes()
+        if self.overdue_threshold is not None:
+            self.title(f"Dues — {self.overdue_threshold}+ Days Overdue")
+            self.after(0, self.load_dues)
 
     def _build_widgets(self) -> None:
         """Build filters, dues table, and export action."""
@@ -38,6 +45,8 @@ class DuesWindow(tk.Toplevel):
         self.class_combo.pack(side="left", padx=6)
         ttk.Button(top, text="Load", command=self.load_dues).pack(side="left", padx=6)
         ttk.Button(top, text="Export", command=self.export).pack(side="right")
+        ttk.Button(top, text="Print Dues Statement", command=self.print_student_statement).pack(side="right", padx=4)
+        ttk.Button(top, text="Issue TC", command=self.issue_tc).pack(side="right", padx=4)
         columns = ("student", "fee_head", "amount_due", "paid", "balance", "due_date", "days")
         self.tree = ttk.Treeview(self, columns=columns, show="headings")
         headings = ("Student", "Fee Head", "Amount Due", "Paid", "Balance", "Due Date", "Days Overdue")
@@ -61,6 +70,7 @@ class DuesWindow(tk.Toplevel):
         term = f"%{self.search_var.get().strip()}%"
         class_filter = self.class_var.get()
         self.rows = []
+        self.row_students: dict[str, dict] = {}
         with connect_db() as conn:
             year = active_academic_year(conn)
             params = [year, term, term]
@@ -68,38 +78,92 @@ class DuesWindow(tk.Toplevel):
             if class_filter:
                 class_sql = " AND s.class = ?"
                 params.append(class_filter)
+            ensure_student_charges(conn, year)
             rows = conn.execute(
                 f"""
-                SELECT s.name AS student, fh.name AS fee_head, fs.amount AS amount_due, fs.due_date,
-                       COALESCE(SUM(p.amount_paid), 0) AS paid,
-                       fs.amount - COALESCE(SUM(p.amount_paid), 0) AS balance
-                FROM students s
-                JOIN fee_structure fs ON fs.class = s.class AND fs.academic_year = ?
-                JOIN fee_heads fh ON fh.id = fs.fee_head_id
-                LEFT JOIN payments p ON p.student_id = s.id AND p.fee_head_id = fs.fee_head_id
-                WHERE s.is_active = 1 AND (s.name LIKE ? OR s.aadhaar LIKE ?){class_sql}
-                GROUP BY s.id, fs.id
-                HAVING balance <> 0
+                SELECT s.id AS student_id, s.name AS student, s.class AS student_class,
+                       fh.name AS fee_head, l.original_amount AS amount_due, l.due_date,
+                       l.paid, l.adjustments, l.balance
+                FROM charge_ledger l
+                JOIN students s ON s.id=l.student_id
+                JOIN fee_heads fh ON fh.id=l.fee_head_id
+                WHERE l.academic_year=? AND l.balance>0 AND l.status<>'CANCELLED'
+                      AND s.is_active=1 AND (s.name LIKE ? OR s.aadhaar LIKE ?){class_sql}
                 ORDER BY s.class, s.name, fh.name
                 """,
                 params,
             ).fetchall()
+        if self.overdue_threshold is not None:
+            rows = [row for row in rows if days_overdue(row["due_date"]) >= self.overdue_threshold]
         for row in rows:
             days = days_overdue(row["due_date"])
             values = (
                 row["student"], row["fee_head"], format_currency(row["amount_due"] or 0),
                 format_currency(row["paid"] or 0), format_currency(row["balance"] or 0), row["due_date"] or "", days,
             )
-            self.rows.append(dict(row) | {"days_overdue": days})
-            self.tree.insert("", "end", values=values, tags=("overdue",) if days > 30 else ())
+            row_data = dict(row) | {"days_overdue": days}
+            self.rows.append(row_data)
+            item = self.tree.insert("", "end", values=values, tags=("overdue",) if days > 30 else ())
+            self.row_students[item] = row_data
+
+    def _selected_student(self) -> dict | None:
+        """Return student metadata for the selected dues row."""
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showwarning("Dues", "Select a student dues row first.", parent=self)
+            return None
+        return self.row_students.get(selected[0])
+
+    @auth.require_role("ADMIN")
+    def issue_tc(self) -> None:
+        """Issue or override a transfer certificate from the selected dues row."""
+        auth.touch_session()
+        row = self._selected_student()
+        if row is None:
+            return
+        from ui_students import DuesClearanceDialog
+
+        DuesClearanceDialog(self, int(row["student_id"]), on_issued=self._tc_issued)
+
+    def _tc_issued(self, path: str) -> None:
+        """Open the TC and refresh dues after successful archival."""
+        self.load_dues()
+        if hasattr(os, "startfile"):
+            os.startfile(path)
+        messagebox.showinfo("Transfer Certificate", f"TC saved to:\n{path}", parent=self)
+
+    def print_student_statement(self) -> None:
+        """Generate a single-student dues statement PDF."""
+        auth.touch_session()
+        row = self._selected_student()
+        if row is None:
+            return
+        from report_generator import classwise_dues_report
+
+        try:
+            with connect_db() as conn:
+                year = active_academic_year(conn)
+                path = classwise_dues_report(conn, row["student_class"], year, int(row["student_id"]))
+        except Exception as exc:
+            messagebox.showerror("Dues Statement", str(exc), parent=self)
+            return
+        if hasattr(os, "startfile"):
+            os.startfile(path)
+        messagebox.showinfo("Dues Statement", f"PDF saved to:\n{path}", parent=self)
 
     def export(self) -> None:
         """Export dues using the report-generator stub."""
         auth.touch_session()
         from report_generator import classwise_dues_report
 
-        result = classwise_dues_report(self.rows)
-        messagebox.showinfo("Dues export", f"Dues report export requested.{f' Output: {result}' if result else ''}")
+        class_name = self.class_var.get().strip()
+        if not class_name:
+            messagebox.showerror("Dues export", "Select a class before exporting the classwise report.")
+            return
+        with connect_db() as conn:
+            academic_year = active_academic_year(conn)
+            result = classwise_dues_report(conn, class_name, academic_year)
+        messagebox.showinfo("Dues export", f"Dues report saved to: {result}")
 
 
 def days_overdue(due_date: str | None) -> int:

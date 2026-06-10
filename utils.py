@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 from datetime import datetime
 
 from config import (
@@ -47,9 +46,3 @@ def generate_receipt_no(conn) -> str:
     if max_receipt_no:
         next_sequence = int(max_receipt_no.rsplit(RECEIPT_SEPARATOR, 1)[1]) + 1
     return f"{prefix}{next_sequence:0{RECEIPT_SEQUENCE_WIDTH}d}"
-
-
-def compute_hash(receipt_no, student_id, amount_paid, payment_date) -> str:
-    """Return the SHA-256 hex digest of the concatenated payment hash fields."""
-    value = f"{receipt_no}{student_id}{amount_paid}{payment_date}"
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()

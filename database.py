@@ -107,6 +107,11 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             payment_mode TEXT,
             note TEXT,
             hash TEXT,
+            cheque_number TEXT,
+            upi_reference TEXT,
+            cheque_status TEXT CHECK(cheque_status IN ('PENDING','CLEARED','BOUNCED','CANCELLED') OR cheque_status IS NULL),
+            cheque_cleared_date TEXT,
+            cheque_bank_reference TEXT,
             FOREIGN KEY (student_id) REFERENCES students(id),
             FOREIGN KEY (fee_head_id) REFERENCES fee_heads(id),
             FOREIGN KEY (collected_by) REFERENCES users(id)
@@ -192,9 +197,14 @@ def _create_tables(conn: sqlite3.Connection) -> None:
         );
 
         CREATE TABLE IF NOT EXISTS receipt_hashes (
-            receipt_no TEXT PRIMARY KEY,
-            sha256_hash TEXT,
-            created_at TEXT
+            receipt_id INTEGER PRIMARY KEY,
+            receipt_no TEXT UNIQUE NOT NULL,
+            hmac_value TEXT,
+            signed_fields_json TEXT,
+            signed_at TEXT,
+            algorithm TEXT NOT NULL DEFAULT 'HMAC-SHA256' CHECK(algorithm='HMAC-SHA256'),
+            legacy_sha256_hash TEXT,
+            FOREIGN KEY (receipt_id) REFERENCES receipts(id)
         );
 
         CREATE TABLE IF NOT EXISTS backups_log (
@@ -305,43 +315,35 @@ def _academic_year_values() -> tuple[str, str, str]:
 
 
 def _seed_first_run(conn: sqlite3.Connection) -> None:
-    """Insert default admin, settings, and active academic year when users table is empty."""
+    """Create only first-install identity/year records; settings use migrations."""
     user_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-    if user_count:
-        return
-
-    password_hash = bcrypt.hashpw(DEFAULT_ADMIN_PASSWORD.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-    conn.execute(
-        """
-        INSERT INTO users (username, password_hash, role, is_active)
-        VALUES (?, ?, ?, ?)
-        """,
-        (DEFAULT_ADMIN_USERNAME, password_hash, DEFAULT_ADMIN_ROLE, DEFAULT_ADMIN_ACTIVE),
-    )
-
-    settings = (
-        (SETTING_SCHOOL_NAME, SCHOOL_NAME),
-        (SETTING_SCHOOL_ADDRESS, SCHOOL_ADDRESS),
-        (SETTING_LOGO_PATH, LOGO_PATH),
-        (SETTING_SESSION_TIMEOUT_MINUTES, str(SESSION_TIMEOUT_DEFAULT)),
-        (SETTING_BACKUP_INTERVAL_HOURS, str(BACKUP_INTERVAL_DEFAULT)),
-    )
-    conn.executemany("INSERT INTO settings (key, value) VALUES (?, ?)", settings)
-
-    label, start_date, end_date = _academic_year_values()
-    conn.execute(
-        """
-        INSERT INTO academic_years (label, start_date, end_date, is_active)
-        VALUES (?, ?, ?, 1)
-        """,
-        (label, start_date, end_date),
-    )
+    if not user_count:
+        password_hash = bcrypt.hashpw(DEFAULT_ADMIN_PASSWORD.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+        conn.execute(
+            "INSERT INTO users(username,password_hash,role,is_active) VALUES(?,?,?,?)",
+            (DEFAULT_ADMIN_USERNAME, password_hash, DEFAULT_ADMIN_ROLE, DEFAULT_ADMIN_ACTIVE),
+        )
+    year_count = conn.execute("SELECT COUNT(*) FROM academic_years").fetchone()[0]
+    if not year_count:
+        label, start_date, end_date = _academic_year_values()
+        conn.execute(
+            "INSERT INTO academic_years(label,start_date,end_date,is_active) VALUES(?,?,?,1)",
+            (label, start_date, end_date),
+        )
 
 
 def init_db() -> None:
-    """Initialize the SQLite database, triggers, and first-run records."""
+    """Initialize the SQLite database, triggers, seed data, and charge ledger."""
+    from ledger import migrate_legacy_ledger
+    from payment_controls import migrate_payment_controls
+    from migrations import run_migrations
+
     with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
         _apply_pragmas(conn)
         _create_tables(conn)
         _create_triggers(conn)
         _seed_first_run(conn)
+        run_migrations(conn)
+        migrate_payment_controls(conn)
+        migrate_legacy_ledger(conn)
