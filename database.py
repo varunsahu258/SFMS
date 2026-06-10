@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from datetime import datetime
 
@@ -15,7 +16,6 @@ from config import (
     CHEQUE_STATUS_PENDING,
     DB_PATH,
     DEFAULT_ADMIN_ACTIVE,
-    DEFAULT_ADMIN_PASSWORD,
     DEFAULT_ADMIN_ROLE,
     DEFAULT_ADMIN_USERNAME,
     LOGO_PATH,
@@ -41,6 +41,7 @@ from config import (
     TRG_PAYMENTS_UPDATE_MSG,
     TRG_RECEIPTS_DELETE_MSG,
 )
+from security_utils import validate_bootstrap_password
 from utils import now_str
 
 
@@ -319,15 +320,50 @@ def _academic_year_values() -> tuple[str, str, str]:
     return label, start_date, end_date
 
 
+def admin_exists(conn: sqlite3.Connection) -> bool:
+    """Return whether at least one administrator account exists."""
+    return conn.execute("SELECT 1 FROM users WHERE role = ? LIMIT 1", (DEFAULT_ADMIN_ROLE,)).fetchone() is not None
+
+
+def bootstrap_required(conn: sqlite3.Connection) -> bool:
+    """Return True when first-time setup must create the initial administrator."""
+    return not admin_exists(conn)
+
+
+def create_initial_admin(conn: sqlite3.Connection, username: str, password: str) -> int:
+    """Create the first administrator after validating the bootstrap password policy."""
+    username = str(username or "").strip()
+    if not username:
+        raise ValueError("Administrator username is required.")
+    ok, message = validate_bootstrap_password(password)
+    if not ok:
+        raise ValueError(message)
+    if admin_exists(conn):
+        raise ValueError("An administrator account already exists.")
+    password_hash = bcrypt.hashpw(str(password).encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    cursor = conn.execute(
+        "INSERT INTO users(username,password_hash,role,is_active,failed_attempts) VALUES(?,?,?,?,0)",
+        (username, password_hash, DEFAULT_ADMIN_ROLE, DEFAULT_ADMIN_ACTIVE),
+    )
+    conn.execute(
+        "INSERT INTO settings(key,value) VALUES('setup_complete','1') "
+        "ON CONFLICT(key) DO UPDATE SET value='1'"
+    )
+    return int(cursor.lastrowid)
+
+
+def bootstrap_from_environment(conn: sqlite3.Connection) -> int | None:
+    """Create the first admin from SFMS_BOOTSTRAP_PASSWORD for headless installs."""
+    password = os.environ.pop("SFMS_BOOTSTRAP_PASSWORD", None)
+    if password is None or not bootstrap_required(conn):
+        return None
+    username = os.environ.get("SFMS_BOOTSTRAP_USERNAME", DEFAULT_ADMIN_USERNAME)
+    return create_initial_admin(conn, username, password)
+
+
 def _seed_first_run(conn: sqlite3.Connection) -> None:
-    """Create only first-install identity/year records; settings use migrations."""
-    user_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-    if not user_count:
-        password_hash = bcrypt.hashpw(DEFAULT_ADMIN_PASSWORD.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-        conn.execute(
-            "INSERT INTO users(username,password_hash,role,is_active) VALUES(?,?,?,?)",
-            (DEFAULT_ADMIN_USERNAME, password_hash, DEFAULT_ADMIN_ROLE, DEFAULT_ADMIN_ACTIVE),
-        )
+    """Create first-install year records and optional headless admin bootstrap."""
+    bootstrap_from_environment(conn)
     year_count = conn.execute("SELECT COUNT(*) FROM academic_years").fetchone()[0]
     if not year_count:
         label, start_date, end_date = _academic_year_values()

@@ -12,6 +12,7 @@ from googleapiclient.http import MediaFileUpload
 
 import auth
 from config import DB_PATH
+from oauth_credentials import load_oauth_token
 from utils import now_str
 
 TOKEN_SETTING = "gdrive_token_json"
@@ -31,8 +32,7 @@ def upload_to_drive(filepath) -> str | None:
     """Upload a backup into the SFMS_Backups Drive folder and log the result."""
     path = Path(filepath)
     with _connect() as conn:
-        row = conn.execute("SELECT value FROM settings WHERE key = ?", (TOKEN_SETTING,)).fetchone()
-        token_json = str(row[0] or "") if row else ""
+        token_json = load_oauth_token()
         if not token_json:
             return None
         if not path.is_file():
