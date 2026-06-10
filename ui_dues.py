@@ -9,7 +9,8 @@ from tkinter import messagebox, ttk
 
 import auth
 from config import SPLASH_BG, SPLASH_FG
-from ui_collection_common import active_academic_year, connect_db
+from ledger import active_academic_year, ensure_student_charges
+from ui_collection_common import connect_db
 from utils import format_currency, today_str
 
 
@@ -77,26 +78,23 @@ class DuesWindow(tk.Toplevel):
             if class_filter:
                 class_sql = " AND s.class = ?"
                 params.append(class_filter)
+            ensure_student_charges(conn, year)
             rows = conn.execute(
                 f"""
                 SELECT s.id AS student_id, s.name AS student, s.class AS student_class,
-                       fh.name AS fee_head, fs.amount AS amount_due, fs.due_date,
-                       COALESCE(SUM(p.amount_paid), 0) AS paid,
-                       fs.amount - COALESCE(SUM(p.amount_paid), 0) AS balance,
-                       MIN(p.payment_date) AS oldest_payment_date
-                FROM students s
-                JOIN fee_structure fs ON fs.class = s.class AND fs.academic_year = ?
-                JOIN fee_heads fh ON fh.id = fs.fee_head_id
-                LEFT JOIN payments p ON p.student_id = s.id AND p.fee_head_id = fs.fee_head_id
-                WHERE s.is_active = 1 AND (s.name LIKE ? OR s.aadhaar LIKE ?){class_sql}
-                GROUP BY s.id, fs.id
-                HAVING balance <> 0
+                       fh.name AS fee_head, l.original_amount AS amount_due, l.due_date,
+                       l.paid, l.adjustments, l.balance
+                FROM charge_ledger l
+                JOIN students s ON s.id=l.student_id
+                JOIN fee_heads fh ON fh.id=l.fee_head_id
+                WHERE l.academic_year=? AND l.balance>0 AND l.status<>'CANCELLED'
+                      AND s.is_active=1 AND (s.name LIKE ? OR s.aadhaar LIKE ?){class_sql}
                 ORDER BY s.class, s.name, fh.name
                 """,
                 params,
             ).fetchall()
         if self.overdue_threshold is not None:
-            rows = [row for row in rows if days_overdue(row["oldest_payment_date"] or row["due_date"]) >= self.overdue_threshold]
+            rows = [row for row in rows if days_overdue(row["due_date"]) >= self.overdue_threshold]
         for row in rows:
             days = days_overdue(row["oldest_payment_date"] or row["due_date"])
             values = (

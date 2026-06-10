@@ -345,9 +345,13 @@ def _seed_first_run(conn: sqlite3.Connection) -> None:
 
 
 def init_db() -> None:
-    """Initialize the SQLite database, triggers, and first-run records."""
+    """Initialize the SQLite database, triggers, seed data, and charge ledger."""
+    from ledger import migrate_legacy_ledger
+
     with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
         _apply_pragmas(conn)
         _create_tables(conn)
         _create_triggers(conn)
         _seed_first_run(conn)
+        migrate_legacy_ledger(conn)

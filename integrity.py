@@ -23,7 +23,7 @@ def _receipt_hash(conn: sqlite3.Connection, receipt_no: str) -> str | None:
     """Recompute the aggregate receipt hash from immutable payment rows."""
     rows = conn.execute(
         """
-        SELECT student_id, amount_paid, payment_date, hash
+        SELECT id, student_id, fee_head_id, amount_paid, payment_date, hash
         FROM payments
         WHERE receipt_no = ?
         ORDER BY id
@@ -32,20 +32,33 @@ def _receipt_hash(conn: sqlite3.Connection, receipt_no: str) -> str | None:
     ).fetchall()
     if not rows:
         return None
-    student_id = _row_value(rows[0], "student_id", 0)
-    payment_date = _row_value(rows[0], "payment_date", 2)
+    student_id = _row_value(rows[0], "student_id", 1)
+    payment_date = _row_value(rows[0], "payment_date", 4)
     for row in rows:
-        amount_paid = float(_row_value(row, "amount_paid", 1) or 0)
-        stored_payment_hash = str(_row_value(row, "hash", 3) or "")
-        expected_payment_hash = compute_hash(
-            receipt_no,
-            _row_value(row, "student_id", 0),
-            amount_paid,
-            _row_value(row, "payment_date", 2),
+        payment_id = _row_value(row, "id", 0)
+        row_student_id = _row_value(row, "student_id", 1)
+        fee_head_id = _row_value(row, "fee_head_id", 2)
+        amount_paid = float(_row_value(row, "amount_paid", 3) or 0)
+        stored_payment_hash = str(_row_value(row, "hash", 5) or "")
+        expected_payment_hash = compute_hash(receipt_no, row_student_id, amount_paid, _row_value(row, "payment_date", 4))
+        allocations = conn.execute(
+            """
+            SELECT a.amount_allocated,a.allocation_type,c.student_id,c.fee_head_id
+            FROM payment_allocations a JOIN student_charges c ON c.id=a.charge_id
+            WHERE a.payment_id=?
+            """, (payment_id,)
+        ).fetchall()
+        allocated_total = sum(
+            -abs(float(item[0])) if item[1] == "REVERSAL" else float(item[0])
+            for item in allocations
         )
+        if not allocations or abs(allocated_total-amount_paid) > 0.005:
+            return None
+        if any(item[2] != row_student_id or item[3] != fee_head_id for item in allocations):
+            return None
         if stored_payment_hash != expected_payment_hash:
             return None
-    total_paid = sum(float(_row_value(row, "amount_paid", 1) or 0) for row in rows)
+    total_paid = sum(float(_row_value(row, "amount_paid", 3) or 0) for row in rows)
     return compute_hash(receipt_no, student_id, total_paid, payment_date)
 
 

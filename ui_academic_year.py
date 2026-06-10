@@ -7,6 +7,7 @@ from tkinter import messagebox, ttk
 
 import auth
 from config import SPLASH_BG, SPLASH_FG
+from ledger import ensure_student_charges
 from ui_master_utils import audit, connect_db, ensure_admin_write
 
 
@@ -91,6 +92,9 @@ class AcademicYearWindow(tk.Toplevel):
             old_rows = [dict(row) for row in conn.execute("SELECT id, label, is_active FROM academic_years")]
             conn.execute("UPDATE academic_years SET is_active = 0")
             conn.execute("UPDATE academic_years SET is_active = 1 WHERE id = ?", (year_id,))
+            selected = conn.execute("SELECT label FROM academic_years WHERE id=?", (year_id,)).fetchone()
+            if selected:
+                ensure_student_charges(conn, selected["label"])
             audit(conn, "ACADEMIC_YEAR_SET_ACTIVE", "academic_years", year_id, old_rows, {"active_id": year_id})
         self.refresh()
 
@@ -105,12 +109,7 @@ class AcademicYearWindow(tk.Toplevel):
             if year is None:
                 return
             payment_count = conn.execute(
-                """
-                SELECT COUNT(*)
-                FROM payments p
-                JOIN fee_structure fs ON fs.fee_head_id = p.fee_head_id
-                WHERE fs.academic_year = ?
-                """,
+                "SELECT COUNT(*) FROM student_charges WHERE academic_year=?",
                 (year["label"],),
             ).fetchone()[0]
             if payment_count:

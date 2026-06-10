@@ -7,6 +7,7 @@ from tkinter import messagebox, ttk
 
 import auth
 from config import SPLASH_BG, SPLASH_FG
+from ledger import ensure_student_charges
 from ui_master_utils import audit, connect_db, ensure_admin_write
 
 
@@ -154,6 +155,10 @@ class FeeStructureWindow(tk.Toplevel):
                 new_values = {"academic_year": academic_year, "class": class_name, "fee_head_id": fee_head_id, "amount": amount, "due_date": due_date}
                 if row:
                     old = dict(conn.execute("SELECT * FROM fee_structure WHERE id = ?", (row["id"],)).fetchone())
+                    charge_count = conn.execute("SELECT COUNT(*) FROM student_charges WHERE fee_structure_id=?", (row["id"],)).fetchone()[0]
+                    if charge_count and (float(old["amount"] or 0) != amount or str(old["due_date"] or "") != due_date):
+                        messagebox.showerror("Fee Structure", "This fee structure already has issued student charges and cannot be edited. Create a new academic-year structure instead.")
+                        return
                     conn.execute("UPDATE fee_structure SET amount = ?, due_date = ? WHERE id = ?", (amount, due_date, row["id"]))
                     audit(conn, "FEE_STRUCTURE_EDIT", "fee_structure", row["id"], old, new_values)
                 else:
@@ -162,4 +167,7 @@ class FeeStructureWindow(tk.Toplevel):
                         (academic_year, class_name, fee_head_id, amount, due_date),
                     )
                     audit(conn, "FEE_STRUCTURE_ADD", "fee_structure", cursor.lastrowid, None, new_values)
+            active = conn.execute("SELECT 1 FROM academic_years WHERE label=? AND is_active=1", (academic_year,)).fetchone()
+            if active:
+                ensure_student_charges(conn, academic_year)
         messagebox.showinfo("Fee Structure", "Fee structure saved.")

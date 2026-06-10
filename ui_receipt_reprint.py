@@ -111,9 +111,13 @@ class ReprintWindow(tk.Toplevel):
             ).fetchone()
             payments = conn.execute(
                 """
-                SELECT fh.name AS fee_head, p.amount_due, p.amount_paid, p.balance,
+                SELECT fh.name AS fee_head, COALESCE(l.original_amount,p.amount_due) AS amount_due,
+                       p.amount_paid, COALESCE(l.balance,0) AS balance,
                        p.payment_date, p.payment_mode, p.note
-                FROM payments p LEFT JOIN fee_heads fh ON fh.id = p.fee_head_id
+                FROM payments p
+                LEFT JOIN payment_allocations pa ON pa.payment_id=p.id
+                LEFT JOIN charge_ledger l ON l.charge_id=pa.charge_id
+                LEFT JOIN fee_heads fh ON fh.id = p.fee_head_id
                 WHERE p.receipt_no = ? ORDER BY p.id
                 """,
                 (self.selected_receipt_no,),

@@ -11,6 +11,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import auth
 from config import SPLASH_BG, SPLASH_FG, STATUS_ACTIVE
+from ledger import active_academic_year, all_outstanding_total, charge_rows
 from ui_master_utils import audit, connect_db, ensure_admin_write
 from utils import format_currency, now_str
 
@@ -70,27 +71,18 @@ PHONE_RE = re.compile(r"^\d{10}$")
 
 
 def student_dues_rows(conn: sqlite3.Connection, student_id: int) -> list[dict]:
-    """Return active-year itemized dues for one student."""
-    active = conn.execute("SELECT label FROM academic_years WHERE is_active = 1 LIMIT 1").fetchone()
-    year = active[0] if active else ""
-    cursor = conn.execute(
-        """
-        SELECT fh.name AS fee_head, fs.amount AS amount_due,
-               COALESCE(SUM(p.amount_paid), 0) AS paid,
-               fs.amount - COALESCE(SUM(p.amount_paid), 0) AS balance
-        FROM students s
-        JOIN fee_structure fs ON fs.class = s.class AND fs.academic_year = ?
-        JOIN fee_heads fh ON fh.id = fs.fee_head_id
-        LEFT JOIN payments p ON p.student_id = s.id AND p.fee_head_id = fs.fee_head_id
-        WHERE s.id = ?
-        GROUP BY fs.id, fh.id
-        HAVING balance > 0
-        ORDER BY fh.name
-        """,
-        (year, student_id),
-    )
-    columns = [description[0] for description in cursor.description]
-    return [dict(row) if hasattr(row, "keys") else dict(zip(columns, row)) for row in cursor.fetchall()]
+    """Return authoritative active-year itemized dues for one student."""
+    rows = charge_rows(conn, student_id, active_academic_year(conn))
+    return [
+        {
+            "fee_head": row["fee_head"],
+            "amount_due": float(row["original_amount"] or 0),
+            "paid": float(row["paid"] or 0),
+            "adjustments": float(row["adjustments"] or 0),
+            "balance": float(row["balance"] or 0),
+        }
+        for row in rows if float(row["balance"] or 0) > 0
+    ]
 
 
 def issue_student_tc(conn: sqlite3.Connection, student_id: int, override_dues=False, override_reason="") -> str:
@@ -297,7 +289,7 @@ class StudentWindow(tk.Toplevel):
         if student_id is None or not ensure_admin_write():
             return
         with connect_db() as conn:
-            due = conn.execute("SELECT COALESCE(SUM(balance), 0) FROM payments WHERE student_id = ?", (student_id,)).fetchone()[0]
+            due = all_outstanding_total(conn, student_id)
             if due and not messagebox.askyesno("Unpaid dues", f"Student has unpaid dues of Rs. {due:,.2f}. Deactivate anyway?"):
                 return
             old = dict(conn.execute("SELECT * FROM students WHERE id = ?", (student_id,)).fetchone())
@@ -312,7 +304,7 @@ class StudentWindow(tk.Toplevel):
         if student_id is None or not ensure_admin_write():
             return
         with connect_db() as conn:
-            due = conn.execute("SELECT COALESCE(SUM(balance), 0) FROM payments WHERE student_id = ?", (student_id,)).fetchone()[0]
+            due = all_outstanding_total(conn, student_id)
             if due > 0:
                 messagebox.showerror("Cannot mark left", f"Student has unpaid dues of Rs. {due:,.2f}.")
                 return
@@ -338,7 +330,7 @@ class StudentWindow(tk.Toplevel):
             if student is None or not student["is_active"] or student["status"] != "ACTIVE":
                 messagebox.showerror("Transfer Certificate", "TC is enabled only for ACTIVE students.", parent=self)
                 return
-            total_dues = float(conn.execute("SELECT COALESCE(SUM(balance), 0) FROM payments WHERE student_id = ?", (student_id,)).fetchone()[0] or 0)
+            total_dues = float(all_outstanding_total(conn, student_id) or 0)
             if total_dues > 0:
                 DuesClearanceDialog(self, student_id, on_issued=self._tc_issued)
                 return

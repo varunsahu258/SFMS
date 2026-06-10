@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from config import BACKUP_INTERVAL_DEFAULT, SETTING_BACKUP_INTERVAL_HOURS
+from ledger import active_academic_year, ensure_student_charges
 from utils import today_str
 
 _SQL_DATE = "date(substr({column}, 7, 4) || '-' || substr({column}, 4, 2) || '-' || substr({column}, 1, 2))"
@@ -29,21 +30,21 @@ def _parse_timestamp(value: str | None) -> datetime | None:
 
 
 def get_overdue_students(conn, threshold_days=30) -> list[dict]:
-    """Return students with positive balances on payments older than a threshold."""
+    """Return students with positive charge-ledger balances older than a threshold."""
     threshold_days = max(0, int(threshold_days))
-    payment_date_sql = _SQL_DATE.format(column="p.payment_date")
+    ensure_student_charges(conn, active_academic_year(conn))
+    due_date_sql = _SQL_DATE.format(column="l.due_date")
     cursor = conn.execute(
         f"""
         SELECT s.id AS student_id, s.name, s.class,
-               SUM(p.balance) AS total_balance,
-               strftime('%d-%m-%Y', MIN({payment_date_sql})) AS oldest_due_date,
-               CAST(julianday('now', 'localtime') - julianday(MIN({payment_date_sql})) AS INTEGER) AS days_overdue
-        FROM payments p
-        JOIN students s ON s.id = p.student_id
-        WHERE {payment_date_sql} < date('now', 'localtime', ?)
-        GROUP BY s.id, s.name, s.class
-        HAVING SUM(p.balance) > 0
-        ORDER BY days_overdue DESC, total_balance DESC
+               SUM(l.balance) AS total_balance,
+               strftime('%d-%m-%Y', MIN({due_date_sql})) AS oldest_due_date,
+               CAST(julianday('now','localtime')-julianday(MIN({due_date_sql})) AS INTEGER) AS days_overdue
+        FROM charge_ledger l JOIN students s ON s.id=l.student_id
+        WHERE l.balance>0 AND l.status<>'CANCELLED' AND s.is_active=1
+              AND {due_date_sql} < date('now','localtime', ?)
+        GROUP BY s.id,s.name,s.class
+        ORDER BY days_overdue DESC,total_balance DESC
         """,
         (f"-{threshold_days} days",),
     )
@@ -55,26 +56,16 @@ def get_overdue_students(conn, threshold_days=30) -> list[dict]:
 
 
 def get_todays_dues(conn) -> list[dict]:
-    """Return today's unpaid fee-structure items for active students."""
+    """Return charge-ledger items due today with positive balances."""
+    ensure_student_charges(conn, active_academic_year(conn))
     cursor = conn.execute(
         """
-        SELECT s.id AS student_id, s.name, s.class,
-               fh.name AS fee_head, MAX(fs.amount) AS amount
-        FROM students s
-        JOIN fee_structure fs ON fs.class = s.class
-        JOIN fee_heads fh ON fh.id = fs.fee_head_id
-        LEFT JOIN (
-            SELECT student_id, fee_head_id,
-                   COUNT(*) AS payment_count,
-                   SUM(balance) AS total_balance
-            FROM payments
-            GROUP BY student_id, fee_head_id
-        ) paid ON paid.student_id = s.id AND paid.fee_head_id = fs.fee_head_id
-        WHERE s.is_active = 1
-          AND fs.due_date = ?
-          AND (COALESCE(paid.payment_count, 0) = 0 OR COALESCE(paid.total_balance, 0) > 0)
-        GROUP BY s.id, s.name, s.class, fh.id, fh.name
-        ORDER BY s.class, s.name, fh.name
+        SELECT s.id AS student_id,s.name,s.class,fh.name AS fee_head,l.balance AS amount
+        FROM charge_ledger l
+        JOIN students s ON s.id=l.student_id
+        JOIN fee_heads fh ON fh.id=l.fee_head_id
+        WHERE s.is_active=1 AND l.status<>'CANCELLED' AND l.due_date=? AND l.balance>0
+        ORDER BY s.class,s.name,fh.name
         """,
         (today_str(),),
     )
@@ -106,47 +97,31 @@ def backup_overdue(conn) -> bool:
 
 
 def get_notification_state(conn) -> dict:
-    """Return cumulative overdue counts, today's dues count, and backup status."""
-    payment_date_sql = _SQL_DATE.format(column="p.payment_date")
+    """Return overdue counts, today's charge count, and backup status."""
+    ensure_student_charges(conn, active_academic_year(conn))
+    due_date_sql = _SQL_DATE.format(column="l.due_date")
     overdue = conn.execute(
         f"""
         WITH student_overdue AS (
-            SELECT p.student_id,
-                   CAST(julianday('now', 'localtime') - julianday(MIN({payment_date_sql})) AS INTEGER) AS days_overdue,
-                   SUM(p.balance) AS total_balance
-            FROM payments p
-            WHERE {payment_date_sql} IS NOT NULL
-            GROUP BY p.student_id
-            HAVING SUM(p.balance) > 0
+            SELECT l.student_id,
+                   CAST(julianday('now','localtime')-julianday(MIN({due_date_sql})) AS INTEGER) AS days_overdue
+            FROM charge_ledger l JOIN students s ON s.id=l.student_id
+            WHERE l.balance>0 AND l.status<>'CANCELLED' AND s.is_active=1
+                  AND {due_date_sql} IS NOT NULL
+            GROUP BY l.student_id
         )
-        SELECT
-            COALESCE(SUM(CASE WHEN days_overdue >= 30 THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN days_overdue >= 60 THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN days_overdue >= 90 THEN 1 ELSE 0 END), 0)
+        SELECT COALESCE(SUM(days_overdue>=30),0),
+               COALESCE(SUM(days_overdue>=60),0),
+               COALESCE(SUM(days_overdue>=90),0)
         FROM student_overdue
         """
     ).fetchone()
     today_due_count = conn.execute(
-        """
-        SELECT COUNT(*) FROM (
-            SELECT s.id, fs.fee_head_id
-            FROM students s
-            JOIN fee_structure fs ON fs.class = s.class
-            LEFT JOIN (
-                SELECT student_id, fee_head_id, COUNT(*) AS payment_count, SUM(balance) AS total_balance
-                FROM payments GROUP BY student_id, fee_head_id
-            ) paid ON paid.student_id = s.id AND paid.fee_head_id = fs.fee_head_id
-            WHERE s.is_active = 1 AND fs.due_date = ?
-              AND (COALESCE(paid.payment_count, 0) = 0 OR COALESCE(paid.total_balance, 0) > 0)
-            GROUP BY s.id, fs.fee_head_id
-        )
-        """,
+        "SELECT COUNT(*) FROM charge_ledger l JOIN students s ON s.id=l.student_id WHERE s.is_active=1 AND l.status<>'CANCELLED' AND l.due_date=? AND l.balance>0",
         (today_str(),),
     ).fetchone()[0]
     return {
-        "overdue_30": int(overdue[0] or 0),
-        "overdue_60": int(overdue[1] or 0),
-        "overdue_90": int(overdue[2] or 0),
-        "today_dues": int(today_due_count or 0),
+        "overdue_30": int(overdue[0] or 0), "overdue_60": int(overdue[1] or 0),
+        "overdue_90": int(overdue[2] or 0), "today_dues": int(today_due_count or 0),
         "backup_overdue": backup_overdue(conn),
     }
