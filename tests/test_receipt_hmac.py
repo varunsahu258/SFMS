@@ -19,6 +19,7 @@ def make_conn():
     conn.row_factory = sqlite3.Row
     conn.executescript(
         """
+        CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT);
         CREATE TABLE users(id INTEGER PRIMARY KEY,username TEXT);
         CREATE TABLE students(id INTEGER PRIMARY KEY,name TEXT);
         CREATE TABLE fee_heads(id INTEGER PRIMARY KEY,name TEXT);
@@ -87,3 +88,69 @@ def test_key_helper_writes_outside_database_tree(tmp_path, monkeypatch):
     assert len(base64.urlsafe_b64decode(destination.read_text().strip())) == 32
     with pytest.raises(FileExistsError):
         receipt_integrity.generate_integrity_key_file(str(destination))
+
+
+def test_integrity_key_is_created_and_reused_without_environment(tmp_path, monkeypatch):
+    import receipt_integrity
+
+    key_path = tmp_path / "config" / "integrity.key"
+    monkeypatch.delenv(receipt_integrity.ENV_KEY, raising=False)
+    monkeypatch.setattr(receipt_integrity, "INTEGRITY_KEY_PATH", key_path)
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT)")
+    first = receipt_integrity.integrity_key(conn)
+    second = receipt_integrity.integrity_key(conn)
+
+    assert first == second
+    assert len(first) == 32
+    assert key_path.is_file()
+
+
+def test_integrity_environment_override_does_not_create_key_file(tmp_path, monkeypatch):
+    import receipt_integrity
+
+    key_path = tmp_path / "config" / "integrity.key"
+    expected = b"e" * 32
+    monkeypatch.setenv(receipt_integrity.ENV_KEY, base64.urlsafe_b64encode(expected).decode("ascii"))
+    monkeypatch.setattr(receipt_integrity, "INTEGRITY_KEY_PATH", key_path)
+
+    assert receipt_integrity.integrity_key() == expected
+    assert not key_path.exists()
+
+
+def test_missing_integrity_key_is_not_silently_replaced(tmp_path, monkeypatch):
+    import receipt_integrity
+
+    key_path = tmp_path / "config" / "integrity.key"
+    monkeypatch.delenv(receipt_integrity.ENV_KEY, raising=False)
+    monkeypatch.setattr(receipt_integrity, "INTEGRITY_KEY_PATH", key_path)
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        "CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT);"
+        "CREATE TABLE receipt_hashes(receipt_id INTEGER PRIMARY KEY);"
+    )
+    original = receipt_integrity.integrity_key(conn)
+    key_path.unlink()
+
+    with pytest.raises(RuntimeError, match="original integrity.key"):
+        receipt_integrity.integrity_key(conn)
+    assert not key_path.exists()
+
+    monkeypatch.setenv(receipt_integrity.ENV_KEY, base64.urlsafe_b64encode(original).decode("ascii"))
+    assert receipt_integrity.integrity_key(conn) == original
+
+
+def test_wrong_integrity_key_is_rejected_for_bound_database(tmp_path, monkeypatch):
+    import receipt_integrity
+
+    key_path = tmp_path / "config" / "integrity.key"
+    monkeypatch.delenv(receipt_integrity.ENV_KEY, raising=False)
+    monkeypatch.setattr(receipt_integrity, "INTEGRITY_KEY_PATH", key_path)
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT)")
+    receipt_integrity.integrity_key(conn)
+    key_path.write_text(base64.urlsafe_b64encode(b"z" * 32).decode("ascii"), encoding="ascii")
+
+    with pytest.raises(RuntimeError, match="does not match this database"):
+        receipt_integrity.integrity_key(conn)

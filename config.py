@@ -2,9 +2,11 @@
 
 from pathlib import Path
 
-from data_paths import apply_restrictive_acl, get_app_data_dir
+from data_paths import apply_restrictive_acl, get_app_config_dir, get_app_data_dir
 
 BASE_DIR = get_app_data_dir()
+CONFIG_DIR = get_app_config_dir()
+INTEGRITY_KEY_PATH = CONFIG_DIR / "integrity.key"
 DB_PATH = BASE_DIR / "fees_data.db"
 RECEIPTS_DIR = BASE_DIR / "receipts"
 REPORTS_DIR = BASE_DIR / "reports"
@@ -65,3 +67,4 @@ for directory in (RECEIPTS_DIR, REPORTS_DIR, BACKUPS_DIR):
     Path(directory).mkdir(parents=True, exist_ok=True)
 
 apply_restrictive_acl(BASE_DIR)
+apply_restrictive_acl(CONFIG_DIR)
