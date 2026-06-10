@@ -7,6 +7,7 @@ from tkinter import messagebox, ttk
 
 import auth
 from config import SPLASH_BG, SPLASH_FG
+from ledger import active_academic_year, add_adjustment, ensure_student_charges
 from ui_collection_common import connect_db, search_students
 from utils import now_str
 
@@ -89,8 +90,29 @@ class DiscountWindow(tk.Toplevel):
             messagebox.showerror("Validation", "Fee head, positive amount, and reason are required.")
             return
         with connect_db() as conn:
-            conn.execute(
-                "INSERT INTO discounts (student_id, fee_head_id, amount, reason, approved_by, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (self.selected_student_id, fee_head_id, amount, self.reason_var.get().strip(), auth.CURRENT_SESSION.user_id, now_str()),
+            year = active_academic_year(conn)
+            ensure_student_charges(conn, year, self.selected_student_id)
+            charges = conn.execute(
+                "SELECT charge_id,balance,due_date FROM charge_ledger WHERE student_id=? AND academic_year=? AND fee_head_id=? AND status<>'CANCELLED' AND balance>0 ORDER BY due_date,charge_id",
+                (self.selected_student_id, year, fee_head_id),
+            ).fetchall()
+            if not charges:
+                messagebox.showerror("Discount", "No outstanding charge exists for this fee head in the active academic year.", parent=self)
+                return
+            if len(charges) != 1:
+                messagebox.showerror(
+                    "Discount",
+                    "This fee head has multiple term charges. Apply the discount from a charge-specific workflow; no charge was changed.",
+                    parent=self,
+                )
+                return
+            charge = charges[0]
+            if amount > float(charge["balance"] or 0) + 0.005:
+                messagebox.showerror("Discount", "Discount cannot exceed the active-year outstanding charge.", parent=self)
+                return
+            cursor = conn.execute(
+                "INSERT INTO discounts (student_id, fee_head_id, amount, reason, approved_by, created_at, academic_year, charge_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (self.selected_student_id, fee_head_id, amount, self.reason_var.get().strip(), auth.CURRENT_SESSION.user_id, now_str(), year, charge["charge_id"]),
             )
+            add_adjustment(conn, charge["charge_id"], "DISCOUNT", amount, "discounts", cursor.lastrowid, self.reason_var.get().strip(), auth.CURRENT_SESSION.user_id)
         messagebox.showinfo("Discount", "Discount saved.")
