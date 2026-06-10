@@ -1,6 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import subprocess
+import sys
+
 from PyInstaller.utils.hooks import collect_submodules
+
+subprocess.check_call([sys.executable, "scripts/generate_icon.py"])
 
 hiddenimports = []
 for package in (

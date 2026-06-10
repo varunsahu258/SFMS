@@ -50,29 +50,49 @@ def _receipt_data(conn, receipt_no: str) -> dict:
     receipt_values = dict(zip(columns, receipt)) if not hasattr(receipt, "keys") else dict(receipt)
 
     payment_columns_available = {row[1] for row in conn.execute("PRAGMA table_info(payments)")}
+    tables_available = {
+        row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
     has_intent = "payment_intent" in payment_columns_available
-    has_years = "allocated_academic_year_id" in payment_columns_available and conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='academic_years'"
-    ).fetchone()
+    has_years = "allocated_academic_year_id" in payment_columns_available and "academic_years" in tables_available
+    has_ledger = {"payment_allocations", "charge_ledger"}.issubset(tables_available)
+    has_cheque_tracker = "cheque_tracker" in tables_available
     intent_columns = (
         "p.payment_intent,p.allocated_term,ay.label AS allocated_academic_year,"
         if has_intent and has_years else
         "'REGULAR' AS payment_intent,NULL AS allocated_term,NULL AS allocated_academic_year,"
     )
+    amount_due_expr = "COALESCE(l.original_amount,p.amount_due)" if has_ledger else "p.amount_due"
+    if has_ledger:
+        balance_expr = "COALESCE(l.balance,0)"
+    elif "balance" in payment_columns_available:
+        balance_expr = "COALESCE(p.balance,0)"
+    else:
+        balance_expr = "0"
+    ledger_join = (
+        "LEFT JOIN payment_allocations pa ON pa.payment_id=p.id "
+        "LEFT JOIN charge_ledger l ON l.charge_id=pa.charge_id"
+        if has_ledger else ""
+    )
     year_join = "LEFT JOIN academic_years ay ON ay.id=p.allocated_academic_year_id" if has_intent and has_years else ""
+    cheque_columns = (
+        "ct.cheque_no, ct.bank"
+        if has_cheque_tracker else
+        f"{'p.cheque_number' if 'cheque_number' in payment_columns_available else 'NULL'} AS cheque_no, NULL AS bank"
+    )
+    cheque_join = "LEFT JOIN cheque_tracker ct ON ct.payment_id = p.id" if has_cheque_tracker else ""
     payment_cursor = conn.execute(
         f"""
-        SELECT p.id, p.fee_head_id, COALESCE(l.original_amount,p.amount_due) AS amount_due,
-               p.amount_paid, COALESCE(l.balance,0) AS balance,
+        SELECT p.id, p.fee_head_id, {amount_due_expr} AS amount_due,
+               p.amount_paid, {balance_expr} AS balance,
                p.payment_date, p.payment_mode, p.note, {intent_columns} fh.name AS fee_head,
-               u.username AS collected_by_name, ct.cheque_no, ct.bank
+               u.username AS collected_by_name, {cheque_columns}
         FROM payments p
-        LEFT JOIN payment_allocations pa ON pa.payment_id=p.id
-        LEFT JOIN charge_ledger l ON l.charge_id=pa.charge_id
+        {ledger_join}
         LEFT JOIN fee_heads fh ON fh.id = p.fee_head_id
         {year_join}
         LEFT JOIN users u ON u.id = p.collected_by
-        LEFT JOIN cheque_tracker ct ON ct.payment_id = p.id
+        {cheque_join}
         WHERE p.receipt_no = ?
         ORDER BY p.id
         """,
@@ -264,7 +284,7 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def print_receipt(conn, receipt_no, reprint=False):
+def print_receipt(conn, receipt_no, reprint=False, reprint_reason: str | None = None):
     """Generate one immutable receipt PDF and append its print-history record."""
     data = _receipt_data(conn, receipt_no)
     settings = _settings(conn)
@@ -331,8 +351,22 @@ def print_receipt(conn, receipt_no, reprint=False):
                            last_reprint_at=?,last_reprint_by=? WHERE id=?""",
                     (timestamp, user_id, receipt_id),
                 )
-                log_action(conn, user_id, "RECEIPT_REPRINT", "receipts", receipt_no, None,
-                           f"reprinted_at={timestamp};filename={target_path.name}")
+                updated = conn.execute(
+                    "SELECT reprint_count FROM receipts WHERE id=?", (receipt_id,)
+                ).fetchone()
+                reprint_count = int(updated[0] or 0) if updated else 0
+                log_action(
+                    conn, user_id, "RECEIPT_REPRINT", "receipts", receipt_id, None,
+                    {
+                        "receipt_id": receipt_id,
+                        "receipt_no": receipt_no,
+                        "reprint_count": reprint_count,
+                        "reprinted_by": user_id,
+                        "reprinted_at": timestamp,
+                        "reason": reprint_reason or "",
+                        "filename": target_path.name,
+                    },
+                )
             conn.commit()
         except Exception:
             conn.rollback()

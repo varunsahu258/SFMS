@@ -29,20 +29,39 @@ def now_str() -> str:
     return datetime.now().strftime(DATETIME_FORMAT)
 
 
+def ensure_receipt_sequence(conn) -> None:
+    """Create and seed the serialized receipt sequence from existing receipts."""
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS receipt_sequence (
+               id INTEGER PRIMARY KEY CHECK(id = 1),
+               last_receipt_no INTEGER NOT NULL DEFAULT 0
+           )"""
+    )
+    row = conn.execute("SELECT 1 FROM receipt_sequence WHERE id=1").fetchone()
+    if row is None:
+        max_seen = 0
+        for (receipt_no,) in conn.execute("SELECT receipt_no FROM receipts WHERE receipt_no IS NOT NULL"):
+            try:
+                max_seen = max(max_seen, int(str(receipt_no).rsplit(RECEIPT_SEPARATOR, 1)[1]))
+            except (IndexError, ValueError):
+                continue
+        conn.execute(
+            "INSERT INTO receipt_sequence(id,last_receipt_no) VALUES(1,?)",
+            (max_seen,),
+        )
+
+
+def get_next_receipt_no(conn) -> int:
+    """Return the next serialized receipt number using SQLite's write lock."""
+    ensure_receipt_sequence(conn)
+    conn.execute("UPDATE receipt_sequence SET last_receipt_no = last_receipt_no + 1 WHERE id = 1")
+    row = conn.execute("SELECT last_receipt_no FROM receipt_sequence WHERE id = 1").fetchone()
+    return int(row[0])
+
+
 def generate_receipt_no(conn) -> str:
-    """Generate the next yearly receipt number in RCP-YYYY-NNNNNN format."""
+    """Generate the next receipt number in RCP-YYYY-NNNNNN format safely."""
     year = datetime.now().strftime("%Y")
     prefix = f"{RECEIPT_PREFIX}{RECEIPT_SEPARATOR}{year}{RECEIPT_SEPARATOR}"
-    row = conn.execute(
-        """
-        SELECT MAX(receipt_no)
-        FROM receipts
-        WHERE receipt_no LIKE ?
-        """,
-        (f"{prefix}%",),
-    ).fetchone()
-    max_receipt_no = row[0] if row else None
-    next_sequence = 1
-    if max_receipt_no:
-        next_sequence = int(max_receipt_no.rsplit(RECEIPT_SEPARATOR, 1)[1]) + 1
+    next_sequence = get_next_receipt_no(conn)
     return f"{prefix}{next_sequence:0{RECEIPT_SEQUENCE_WIDTH}d}"

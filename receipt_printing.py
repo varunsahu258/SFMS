@@ -34,6 +34,7 @@ def print_committed_receipt(
     receipt_no: str,
     *,
     reprint: bool = False,
+    reprint_reason: str | None = None,
     printer: Printer | None = None,
     db_path: str = DB_PATH,
 ) -> str:
@@ -49,7 +50,10 @@ def print_committed_receipt(
             ).fetchone()
             if not exists:
                 raise ValueError("Committed receipt was not found.")
-            return printer(conn, receipt_no, reprint)
+            try:
+                return printer(conn, receipt_no, reprint, reprint_reason=reprint_reason)
+            except TypeError:
+                return printer(conn, receipt_no, reprint)
     except Exception as exc:
         with _connect(db_path) as failure_conn:
             record_print_failure(failure_conn, receipt_id, exc)

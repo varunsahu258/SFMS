@@ -42,7 +42,7 @@ from config import (
     TRG_RECEIPTS_DELETE_MSG,
 )
 from security_utils import validate_bootstrap_password
-from utils import now_str
+from utils import ensure_receipt_sequence, now_str
 
 
 def _apply_pragmas(conn: sqlite3.Connection) -> None:
@@ -121,6 +121,11 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             FOREIGN KEY (fee_head_id) REFERENCES fee_heads(id),
             FOREIGN KEY (collected_by) REFERENCES users(id),
             FOREIGN KEY (allocated_academic_year_id) REFERENCES academic_years(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS receipt_sequence (
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            last_receipt_no INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS receipts (
@@ -390,4 +395,5 @@ def init_db() -> None:
         run_migrations(conn, through="v004_receipt_print_tracking")
         migrate_payment_controls(conn)
         migrate_legacy_ledger(conn)
+        ensure_receipt_sequence(conn)
         run_migrations(conn)

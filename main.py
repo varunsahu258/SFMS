@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import queue
 import sqlite3
 import threading
 import time
@@ -18,6 +19,7 @@ from config import (
     SPLASH_DURATION_MS,
 )
 from database import init_db
+from app_events import BACKUP_WARNING, SESSION_TIMEOUT, ui_event_queue
 from integrity import MachineAuthorizationRequired, record_machine_fingerprint, startup_integrity_check
 
 _MONITORS_STARTED = False
@@ -48,12 +50,79 @@ def start_timeout_monitor() -> None:
                 with sqlite3.connect(DB_PATH) as conn:
                     _apply_pragmas(conn)
                     auto_backup(conn)
-            except Exception:
-                continue
+            except Exception as exc:
+                from backup import record_auto_backup_failure
+
+                with sqlite3.connect(DB_PATH) as failure_conn:
+                    _apply_pragmas(failure_conn)
+                    record_auto_backup_failure(failure_conn, exc)
 
     threading.Thread(target=monitor, daemon=True).start()
     threading.Thread(target=auto_backup_loop, daemon=True).start()
 
+
+
+def destroy_authenticated_windows(root: tk.Misc | None = None) -> None:
+    """Destroy all Tk windows that may belong to an authenticated session."""
+    root = root or tk._default_root
+    candidates = []
+    if root is not None:
+        candidates.append(root)
+        try:
+            candidates.extend(root.winfo_children())
+        except tk.TclError:
+            pass
+    for window in list(candidates):
+        try:
+            if isinstance(window, tk.Toplevel) and window.winfo_exists():
+                window.destroy()
+        except tk.TclError:
+            pass
+
+
+def handle_session_timeout(root: tk.Misc | None = None) -> None:
+    """Handle a queued timeout event on Tk's main thread."""
+    import auth
+
+    auth.logout()
+    destroy_authenticated_windows(root)
+    messagebox.showinfo("Session timed out", "Your session has expired. Please log in again.")
+    _launch_login_window()
+
+
+def poll_ui_events(root: tk.Misc | None = None) -> None:
+    """Poll worker-produced events and perform all Tk work on the main thread."""
+    root = root or tk._default_root
+    while True:
+        try:
+            event = ui_event_queue.get_nowait()
+        except queue.Empty:
+            break
+        if event.type == SESSION_TIMEOUT:
+            handle_session_timeout(root)
+        elif event.type == BACKUP_WARNING:
+            _show_backup_failure_banner(root, int((event.payload or {}).get("failures", 0)))
+    if root is not None:
+        try:
+            root.after(1000, lambda: poll_ui_events(root))
+        except tk.TclError:
+            pass
+
+
+def _show_backup_failure_banner(root: tk.Misc | None, failures: int) -> None:
+    """Display a non-dismissible backup warning on the main dashboard when present."""
+    root = root or tk._default_root
+    if root is None:
+        return
+    for child in [root, *getattr(root, "winfo_children", lambda: [])()]:
+        if hasattr(child, "show_backup_failure_warning"):
+            child.show_backup_failure_warning(failures)
+            return
+    messagebox.showwarning(
+        "Automatic backup failed",
+        f"Automatic backups have failed {failures} consecutive times. Open Backup Status and run Backup Now.",
+        parent=root if hasattr(root, "winfo_exists") else None,
+    )
 
 def _apply_pragmas(conn: sqlite3.Connection) -> None:
     """Apply required SQLite pragmas for this database connection."""
@@ -131,6 +200,7 @@ def show_splash() -> None:
         fg=root._sfms_palette["fg"],
     ).pack(pady=(8, 0))
 
+    poll_ui_events(root)
     root.after(SPLASH_DURATION_MS, lambda: _open_login(root))
     root.mainloop()
 
