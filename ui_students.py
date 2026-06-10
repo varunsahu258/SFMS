@@ -247,7 +247,7 @@ class StudentWindow(tk.Toplevel):
                            SELECT 1 FROM audit_log a
                            WHERE a.record_id = CAST(s.id AS TEXT) AND a.action = 'TC_ISSUED'
                        ) THEN 'Yes' ELSE 'No' END AS tc_issued,
-                       COALESCE((SELECT SUM(r.total_paid) FROM receipts r WHERE r.student_id = s.id), 0) AS total_paid
+                       COALESCE((SELECT SUM(CASE WHEN p.note LIKE 'VOID of %' THEN p.amount_paid WHEN UPPER(p.payment_mode)<>'CHEQUE' OR p.cheque_status='CLEARED' THEN p.amount_paid ELSE 0 END) FROM payments p WHERE p.student_id=s.id),0) AS total_paid
                 FROM students s
                 WHERE s.status = 'LEFT' AND (s.name LIKE ? OR s.class LIKE ? OR s.aadhaar LIKE ?)
                 ORDER BY s.class, s.name

@@ -11,6 +11,7 @@ import auth
 from audit import log_action
 from config import DB_PATH, SPLASH_BG, SPLASH_FG
 from ledger import active_academic_year, allocate_payment, charge_rows
+from payment_controls import normalize_reference
 from receipt_printer import print_receipt
 from utils import compute_hash, format_currency, generate_receipt_no, now_str, today_str
 
@@ -116,7 +117,7 @@ class ChequeDetailDialog(tk.Toplevel):
         if not self.cheque_var.get().strip() or not self.bank_var.get().strip():
             messagebox.showerror("Cheque details", "Cheque number and bank are required.")
             return
-        self.result = {"cheque_no": self.cheque_var.get().strip(), "bank": self.bank_var.get().strip()}
+        self.result = {"cheque_no": normalize_reference(self.cheque_var.get()), "bank": self.bank_var.get().strip()}
         self.destroy()
 
 
@@ -148,7 +149,7 @@ class UPIDetailDialog(tk.Toplevel):
         if not self.ref_var.get().strip():
             messagebox.showerror("UPI details", "Transaction reference is required.")
             return
-        self.result = {"transaction_ref": self.ref_var.get().strip()}
+        self.result = {"transaction_ref": normalize_reference(self.ref_var.get())}
         self.destroy()
 
 
@@ -339,12 +340,16 @@ class CollectionBaseWindow(tk.Toplevel):
                     """
                     INSERT INTO payments (
                         student_id, receipt_no, fee_head_id, amount_due, amount_paid, balance,
-                        payment_date, collected_by, payment_mode, note, hash
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        payment_date, collected_by, payment_mode, note, hash,
+                        cheque_number, upi_reference, cheque_status
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         self.selected_student_id, receipt_no, item["fee_head_id"], amount_due, amount_paid, balance,
                         payment_date, auth.CURRENT_SESSION.user_id, item["mode"], item.get("note", ""), payment_hash,
+                        item.get("cheque_no") if item["mode"] == "CHEQUE" else None,
+                        item.get("note") if item["mode"] == "UPI" else None,
+                        "PENDING" if item["mode"] == "CHEQUE" else None,
                     ),
                 )
                 payment_ids.append(cursor.lastrowid)

@@ -15,6 +15,7 @@ from ledger import (
     install_ledger_schema,
     migrate_legacy_ledger,
 )
+from payment_controls import migrate_payment_controls
 
 
 def schema(conn: sqlite3.Connection) -> None:
@@ -28,6 +29,7 @@ def schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE fee_structure(id INTEGER PRIMARY KEY,academic_year TEXT,class TEXT,fee_head_id INTEGER,amount REAL,due_date TEXT);
         CREATE TABLE academic_years(id INTEGER PRIMARY KEY,label TEXT,start_date TEXT,end_date TEXT,is_active INTEGER);
         CREATE TABLE payments(id INTEGER PRIMARY KEY,student_id INTEGER,receipt_no TEXT,fee_head_id INTEGER,amount_due REAL,amount_paid REAL,balance REAL,payment_date TEXT,collected_by INTEGER,payment_mode TEXT,note TEXT,hash TEXT);
+        CREATE TABLE cheque_tracker(id INTEGER PRIMARY KEY,payment_id INTEGER,cheque_no TEXT,bank TEXT,amount REAL,collected_on TEXT,status TEXT,updated_at TEXT);
         CREATE TABLE receipts(id INTEGER PRIMARY KEY,receipt_no TEXT UNIQUE,student_id INTEGER,total_paid REAL,receipt_type TEXT,printed_at TEXT,printed_by INTEGER,reprint_count INTEGER,last_reprint_at TEXT,last_reprint_by INTEGER);
         CREATE TABLE receipt_hashes(receipt_no TEXT PRIMARY KEY,sha256_hash TEXT,created_at TEXT);
         CREATE TABLE discounts(id INTEGER PRIMARY KEY,student_id INTEGER,fee_head_id INTEGER,amount REAL,reason TEXT,approved_by INTEGER,created_at TEXT);
@@ -43,12 +45,13 @@ def schema(conn: sqlite3.Connection) -> None:
         INSERT INTO fee_structure VALUES(2,'2026-27','Class 1',1,12000,'01-04-2026');
         """
     )
+    migrate_payment_controls(conn)
     install_ledger_schema(conn)
 
 
 def insert_payment(conn, payment_id: int, receipt: str, amount: float, date: str) -> None:
     conn.execute(
-        "INSERT INTO payments VALUES(?,?,?,1,?,?,?, ?,1,'CASH','', 'hash')",
+        "INSERT INTO payments(id,student_id,receipt_no,fee_head_id,amount_due,amount_paid,balance,payment_date,collected_by,payment_mode,note,hash) VALUES(?,?,?,1,?,?,?, ?,1,'CASH','', 'hash')",
         (payment_id, 1, receipt, amount, amount, 0, date),
     )
 
@@ -117,7 +120,7 @@ def test_partial_and_full_payment_voids_restore_derived_outstanding():
     charge_id = charge_rows(conn, 1, "2026-27")[0]["charge_id"]
 
     # Deliberately wrong legacy balance snapshots prove that the ledger ignores them.
-    conn.execute("INSERT INTO payments VALUES(1,1,'PART',1,100,40,60,'01-05-2026',1,'CASH','','hash')")
+    conn.execute("INSERT INTO payments(id,student_id,receipt_no,fee_head_id,amount_due,amount_paid,balance,payment_date,collected_by,payment_mode,note,hash) VALUES(1,1,'PART',1,100,40,60,'01-05-2026',1,'CASH','','hash')")
     conn.execute("INSERT INTO receipts VALUES(1,'PART',1,40,'BIG','01-05-2026',1,0,NULL,NULL)")
     allocate_payment(conn, 1, charge_id, 40, "PAYMENT")
     assert charge_outstanding(conn, charge_id) == 60
@@ -128,7 +131,7 @@ def test_partial_and_full_payment_voids_restore_derived_outstanding():
     )
     assert charge_outstanding(conn, charge_id) == 100
 
-    conn.execute("INSERT INTO payments VALUES(3,1,'FULL',1,100,100,0,'03-05-2026',1,'CASH','','hash')")
+    conn.execute("INSERT INTO payments(id,student_id,receipt_no,fee_head_id,amount_due,amount_paid,balance,payment_date,collected_by,payment_mode,note,hash) VALUES(3,1,'FULL',1,100,100,0,'03-05-2026',1,'CASH','','hash')")
     conn.execute("INSERT INTO receipts VALUES(3,'FULL',1,100,'BIG','03-05-2026',1,0,NULL,NULL)")
     allocate_payment(conn, 3, charge_id, 100, "PAYMENT")
     assert charge_outstanding(conn, charge_id) == 0

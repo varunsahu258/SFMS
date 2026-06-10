@@ -36,6 +36,9 @@ def create_void_receipt(
         raise ValueError("A void receipt cannot itself be voided.")
     if any(float(payment.get("amount_paid") or 0) <= 0 for payment in original_payments):
         raise ValueError("Only successful positive payments can be voided.")
+    if any(str(payment.get("payment_mode") or "").upper() == "CHEQUE" and
+           str(payment.get("cheque_status") or "").upper() != "CLEARED" for payment in original_payments):
+        raise ValueError("Pending, bounced, or cancelled cheques must use cheque lifecycle management, not payment void.")
     duplicate = conn.execute(
         "SELECT 1 FROM payments WHERE note = ? LIMIT 1",
         (f"VOID of {original_receipt_no}",),
@@ -60,8 +63,8 @@ def create_void_receipt(
             INSERT INTO payments (
                 student_id, receipt_no, fee_head_id, amount_due,
                 amount_paid, balance, payment_date, collected_by,
-                payment_mode, note, hash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                payment_mode, note, hash, cheque_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 original["student_id"], void_receipt_no,
@@ -69,6 +72,7 @@ def create_void_receipt(
                 reversed_amount, 0, payment_date,
                 user_id, original["payment_mode"],
                 f"VOID of {original_receipt_no}", payment_hash,
+                "CLEARED" if str(original["payment_mode"] or "").upper()=="CHEQUE" else None,
             ),
         )
         allocations = conn.execute(

@@ -22,6 +22,7 @@ from config import REPORTS_DIR, SCHOOL_NAME
 from excel_exporter import export_to_excel
 from audit import log_action
 from ledger import active_academic_year, all_outstanding_total, ensure_student_charges
+from payment_controls import payment_revenue_amount, uncleared_cheque_amount
 from utils import format_currency, today_str
 
 MARGIN = 20 * mm
@@ -205,15 +206,16 @@ def daily_report(conn, date_str) -> str:
     """Generate receipt, fee-head, staff, and grand-total collections for a date."""
     rows = _row_dicts(conn.execute(
         """
-        SELECT p.receipt_no, p.payment_date, p.amount_paid, p.payment_mode, p.note,
+        SELECT p.receipt_no, p.payment_date, p.cheque_cleared_date, p.amount_paid, p.payment_mode, p.note,
                s.name AS student, fh.name AS fee_head, u.username AS collected_by,
-               ct.cheque_no
+               COALESCE(p.cheque_number,ct.cheque_no) AS cheque_no,p.cheque_status,p.upi_reference
         FROM payments p
         JOIN students s ON s.id = p.student_id
         LEFT JOIN fee_heads fh ON fh.id = p.fee_head_id
         LEFT JOIN users u ON u.id = p.collected_by
         LEFT JOIN cheque_tracker ct ON ct.payment_id = p.id
-        WHERE p.payment_date = ?
+        WHERE CASE WHEN UPPER(p.payment_mode)='CHEQUE' AND p.cheque_status='CLEARED'
+                   THEN p.cheque_cleared_date ELSE p.payment_date END = ?
         ORDER BY p.receipt_no, p.id
         """,
         (date_str,),
@@ -228,10 +230,12 @@ def daily_report(conn, date_str) -> str:
         group["heads"].append(row.get("fee_head") or "Fee")
         group["amounts"].append(format_currency(row.get("amount_paid") or 0))
         mode = str(row.get("payment_mode") or "").upper()
-        mode_text = f"Cheque {row.get('cheque_no') or ''}" if mode == "CHEQUE" else (f"UPI {row.get('note') or ''}" if mode == "UPI" else mode.title())
+        mode_text = f"Cheque {row.get('cheque_no') or ''} ({row.get('cheque_status') or 'PENDING'})" if mode == "CHEQUE" else (f"UPI {row.get('upi_reference') or row.get('note') or ''}" if mode == "UPI" else mode.title())
         if mode_text and mode_text not in group["modes"]:
             group["modes"].append(mode_text)
-        amount = float(row.get("amount_paid") or 0)
+        amount = payment_revenue_amount(row.get("payment_mode"), row.get("cheque_status"), row.get("amount_paid"), row.get("note"))
+        uncleared = uncleared_cheque_amount(row.get("payment_mode"), row.get("cheque_status"), row.get("amount_paid"), row.get("note"))
+        group["uncleared"] = group.get("uncleared", 0.0) + uncleared
         head_totals[row.get("fee_head") or "Fee"] += amount
         staff_totals[row.get("collected_by") or "Unknown"] += amount
         grand_total += amount
@@ -239,17 +243,18 @@ def daily_report(conn, date_str) -> str:
     path = _output_path(f"daily_{str(date_str).replace('-', '').replace('/', '')}.pdf")
     story: list = []
     _header(story, conn, f"Daily Collection Report — {date_str}")
-    receipt_data = [["Receipt No", "Student", "Fee Heads", "Amounts", "Mode", "Collected By"]]
+    receipt_data = [["Receipt No", "Student", "Fee Heads", "Amounts", "Mode", "Uncleared Cheques", "Collected By"]]
     for receipt_no, group in receipt_groups.items():
-        receipt_data.append([receipt_no, group["student"], ", ".join(group["heads"]), ", ".join(group["amounts"]), " / ".join(group["modes"]), group["staff"]])
+        receipt_data.append([receipt_no, group["student"], ", ".join(group["heads"]), ", ".join(group["amounts"]), " / ".join(group["modes"]), format_currency(group.get("uncleared",0)), group["staff"]])
     if len(receipt_data) == 1:
-        receipt_data.append(["No collections", "", "", "", "", ""])
-    story.append(_table(receipt_data, [25 * mm, 29 * mm, 36 * mm, 27 * mm, 26 * mm, 27 * mm], 6.5, right_columns=(3,)))
+        receipt_data.append(["No collections", "", "", "", "", format_currency(0), ""])
+    story.append(_table(receipt_data, [22 * mm, 25 * mm, 30 * mm, 23 * mm, 25 * mm, 24 * mm, 21 * mm], 6, right_columns=(3,5)))
 
     styles = _styles()
     story.extend([Paragraph("Fee Head Totals", styles["heading"]), _table([["Fee Head", "Total Collected"]] + [[name, format_currency(total)] for name, total in sorted(head_totals.items())] or [["Fee Head", "Total Collected"], ["No collections", format_currency(0)]], [90 * mm, 80 * mm], right_columns=(1,))])
     story.extend([Paragraph("Staff Totals", styles["heading"]), _table([["Staff Name", "Total Collected"]] + [[name, format_currency(total)] for name, total in sorted(staff_totals.items())] or [["Staff Name", "Total Collected"], ["No collections", format_currency(0)]], [90 * mm, 80 * mm], right_columns=(1,))])
-    story.extend([Spacer(1, 4 * mm), Paragraph(f"Grand Total: {format_currency(grand_total)}", styles["right"])])
+    uncleared_total = sum(group.get("uncleared",0) for group in receipt_groups.values())
+    story.extend([Spacer(1, 4 * mm), Paragraph(f"Recognized Grand Total: {format_currency(grand_total)} | Uncleared Cheques: {format_currency(uncleared_total)}", styles["right"])])
     _document(path, f"Daily Collection Report {date_str}").build(story)
     return path
 
@@ -258,23 +263,29 @@ def monthly_report(conn, year, month) -> str:
     """Generate date-grouped monthly collections with previous-month comparison."""
     year = int(year)
     month = int(month)
-    rows = _row_dicts(conn.execute("SELECT receipt_no, payment_date, amount_paid FROM payments ORDER BY payment_date, receipt_no"))
+    rows = _row_dicts(conn.execute("SELECT receipt_no,payment_date,cheque_cleared_date,amount_paid,payment_mode,cheque_status,note FROM payments ORDER BY payment_date,receipt_no"))
     totals: defaultdict[str, float] = defaultdict(float)
     receipts: defaultdict[str, set[str]] = defaultdict(set)
+    uncleared_totals: defaultdict[str, float] = defaultdict(float)
     current_total = 0.0
+    current_uncleared = 0.0
     previous_total = 0.0
     previous_year = year if month > 1 else year - 1
     previous_month = month - 1 if month > 1 else 12
     for row in rows:
-        parsed = _parse_date(row.get("payment_date"))
+        effective_date = row.get("cheque_cleared_date") if str(row.get("payment_mode") or "").upper()=="CHEQUE" and str(row.get("cheque_status") or "").upper()=="CLEARED" else row.get("payment_date")
+        parsed = _parse_date(effective_date)
         if not parsed:
             continue
-        amount = float(row.get("amount_paid") or 0)
+        amount = payment_revenue_amount(row.get("payment_mode"),row.get("cheque_status"),row.get("amount_paid"),row.get("note"))
+        uncleared = uncleared_cheque_amount(row.get("payment_mode"),row.get("cheque_status"),row.get("amount_paid"),row.get("note"))
         if parsed.year == year and parsed.month == month:
             key = parsed.strftime("%d-%m-%Y")
             totals[key] += amount
+            uncleared_totals[key] += uncleared
             receipts[key].add(str(row.get("receipt_no") or ""))
             current_total += amount
+            current_uncleared += uncleared
         elif parsed.year == previous_year and parsed.month == previous_month:
             previous_total += amount
 
@@ -282,14 +293,14 @@ def monthly_report(conn, year, month) -> str:
     path = _output_path(f"monthly_{year}_{month:02d}.pdf")
     story: list = []
     _header(story, conn, f"Monthly Collection Report — {month_name}")
-    data = [["Date", "Receipt Count", "Total Collected"]]
+    data = [["Date", "Receipt Count", "Recognized Revenue", "Uncleared Cheques"]]
     for day in sorted(totals, key=lambda value: datetime.strptime(value, "%d-%m-%Y")):
-        data.append([day, len(receipts[day]), format_currency(totals[day])])
+        data.append([day, len(receipts[day]), format_currency(totals[day]), format_currency(uncleared_totals[day])])
     if len(data) == 1:
-        data.append(["No collections", 0, format_currency(0)])
-    story.append(_table(data, [62 * mm, 43 * mm, 65 * mm], right_columns=(1, 2)))
+        data.append(["No collections", 0, format_currency(0), format_currency(0)])
+    story.append(_table(data, [45 * mm, 35 * mm, 48 * mm, 42 * mm], right_columns=(1, 2, 3)))
     styles = _styles()
-    story.extend([Spacer(1, 6 * mm), Paragraph(f"Previous Month: {format_currency(previous_total)} | This Month: {format_currency(current_total)}", styles["right"])])
+    story.extend([Spacer(1, 6 * mm), Paragraph(f"Previous Month Recognized: {format_currency(previous_total)} | This Month Recognized: {format_currency(current_total)} | Uncleared Cheques: {format_currency(current_uncleared)}", styles["right"])])
     _document(path, f"Monthly Collection Report {month_name}").build(story)
     return path
 
@@ -406,7 +417,7 @@ def cashflow_chart_report(conn, academic_year) -> str:
     """Generate a black-and-white monthly collection bar chart."""
     bounds = _academic_bounds(conn, academic_year)
     rows = _row_dicts(conn.execute(
-        "SELECT p.payment_date,a.amount_allocated AS amount_paid FROM payment_allocations a JOIN payments p ON p.id=a.payment_id JOIN student_charges c ON c.id=a.charge_id WHERE c.academic_year=?",
+        "SELECT CASE WHEN UPPER(p.payment_mode)='CHEQUE' AND p.cheque_status='CLEARED' THEN p.cheque_cleared_date ELSE p.payment_date END AS payment_date,CASE WHEN a.allocation_type='REVERSAL' THEN -a.amount_allocated WHEN UPPER(p.payment_mode)<>'CHEQUE' OR p.cheque_status='CLEARED' THEN a.amount_allocated ELSE 0 END AS amount_paid FROM payment_allocations a JOIN payments p ON p.id=a.payment_id JOIN student_charges c ON c.id=a.charge_id WHERE c.academic_year=?",
         (academic_year,),
     ))
     monthly: defaultdict[tuple[int, int], float] = defaultdict(float)
@@ -575,7 +586,8 @@ def feehead_collection_report(conn, academic_year, month=None) -> str:
     rows = _row_dicts(conn.execute(
         """
         SELECT fh.id AS fee_head_id,fh.name AS fee_head,
-               a.amount_allocated AS amount_paid,p.payment_date
+               a.amount_allocated AS amount_paid,a.allocation_type,p.payment_date,p.cheque_cleared_date,
+               p.payment_mode,p.cheque_status,p.note
         FROM payment_allocations a JOIN payments p ON p.id=a.payment_id
         JOIN student_charges c ON c.id=a.charge_id
         JOIN fee_heads fh ON fh.id=c.fee_head_id
@@ -584,33 +596,42 @@ def feehead_collection_report(conn, academic_year, month=None) -> str:
         """, (academic_year,)
     ))
     totals: defaultdict[str, float] = defaultdict(float)
+    uncleared_totals: defaultdict[str, float] = defaultdict(float)
     for row in rows:
-        payment_date = _parse_date(row.get("payment_date"))
-        if not payment_date or not _in_bounds(row.get("payment_date"), bounds):
+        effective_date = row.get("cheque_cleared_date") if str(row.get("payment_mode") or "").upper()=="CHEQUE" and str(row.get("cheque_status") or "").upper()=="CLEARED" else row.get("payment_date")
+        payment_date = _parse_date(effective_date)
+        if not payment_date or not _in_bounds(effective_date, bounds):
             continue
         if month_value is not None and payment_date.month != month_value:
             continue
-        totals[row["fee_head"] or "Fee"] += float(row.get("amount_paid") or 0)
+        raw = -float(row.get("amount_paid") or 0) if row.get("allocation_type") == "REVERSAL" else float(row.get("amount_paid") or 0)
+        recognized = raw if row.get("allocation_type") == "REVERSAL" else payment_revenue_amount(row.get("payment_mode"),row.get("cheque_status"),raw,row.get("note"))
+        uncleared = 0.0 if row.get("allocation_type") == "REVERSAL" else uncleared_cheque_amount(row.get("payment_mode"),row.get("cheque_status"),raw,row.get("note"))
+        key = row["fee_head"] or "Fee"
+        totals[key] += recognized
+        uncleared_totals[key] += uncleared
 
     period = datetime(2000, month_value, 1).strftime("%B") if month_value else "Full Academic Year"
     title = f"Fee Head Collection Report — {academic_year} — {period}"
-    excel_rows = [{"Fee Head": name, "Amount Collected": amount} for name, amount in sorted(totals.items())]
+    names = sorted(set(totals) | set(uncleared_totals))
+    excel_rows = [{"Fee Head": name, "Recognized Revenue": totals[name], "Uncleared Cheques": uncleared_totals[name]} for name in names]
     grand_total = sum(totals.values())
-    excel_rows.append({"Fee Head": "TOTAL", "Amount Collected": grand_total})
+    uncleared_grand_total = sum(uncleared_totals.values())
+    excel_rows.append({"Fee Head": "TOTAL", "Recognized Revenue": grand_total, "Uncleared Cheques": uncleared_grand_total})
 
     suffix = f"_{month_value:02d}" if month_value else ""
     stem = f"feehead_collection_{_safe_name(academic_year)}{suffix}"
     pdf_path = _output_path(f"{stem}.pdf")
     story: list = []
     _header(story, conn, title)
-    table_data = [["Fee Head", "Amount Collected"]] + [
-        [row["Fee Head"], format_currency(row["Amount Collected"])] for row in excel_rows
+    table_data = [["Fee Head", "Recognized Revenue", "Uncleared Cheques"]] + [
+        [row["Fee Head"], format_currency(row["Recognized Revenue"]), format_currency(row["Uncleared Cheques"])] for row in excel_rows
     ]
-    story.append(_table(table_data, [100 * mm, 70 * mm], right_columns=(1,)))
+    story.append(_table(table_data, [80 * mm, 45 * mm, 45 * mm], right_columns=(1,2)))
     _document(pdf_path, title).build(story)
     export_to_excel(
         excel_rows,
-        ["Fee Head", "Amount Collected"],
+        ["Fee Head", "Recognized Revenue", "Uncleared Cheques"],
         title,
         stem,
         _excel_metadata(f"academic_year={academic_year}; month={month_value or 'all'}"),
@@ -630,20 +651,23 @@ def comparative_report(conn, year, month) -> str:
     same_last_year = year - 1
     rows = _row_dicts(conn.execute(
         """
-        SELECT fh.name AS fee_head, p.amount_paid, p.payment_date
+        SELECT fh.name AS fee_head,p.amount_paid,p.payment_date,p.cheque_cleared_date,p.payment_mode,p.cheque_status,p.note
         FROM payments p JOIN fee_heads fh ON fh.id = p.fee_head_id
         ORDER BY fh.name
         """
     ))
     grouped: dict[str, list[float]] = {}
     for row in rows:
-        payment_date = _parse_date(row.get("payment_date"))
+        effective_date = row.get("cheque_cleared_date") if str(row.get("payment_mode") or "").upper()=="CHEQUE" and str(row.get("cheque_status") or "").upper()=="CLEARED" else row.get("payment_date")
+        payment_date = _parse_date(effective_date)
         if not payment_date:
             continue
-        values = grouped.setdefault(row["fee_head"] or "Fee", [0.0, 0.0, 0.0])
-        amount = float(row.get("amount_paid") or 0)
+        values = grouped.setdefault(row["fee_head"] or "Fee", [0.0, 0.0, 0.0, 0.0])
+        amount = payment_revenue_amount(row.get("payment_mode"),row.get("cheque_status"),row.get("amount_paid"),row.get("note"))
+        uncleared = uncleared_cheque_amount(row.get("payment_mode"),row.get("cheque_status"),row.get("amount_paid"),row.get("note"))
         if payment_date.year == year and payment_date.month == month:
             values[0] += amount
+            values[3] += uncleared
         if payment_date.year == previous_year and payment_date.month == previous_month:
             values[1] += amount
         if payment_date.year == same_last_year and payment_date.month == month:
@@ -655,18 +679,20 @@ def comparative_report(conn, year, month) -> str:
     current_header = f"Amount {current_label}"
     previous_header = f"Amount {previous_label}"
     last_year_header = f"Amount {last_year_label}"
-    headers = ["Fee Head", current_header, previous_header, last_year_header]
+    uncleared_header = f"Uncleared {current_label}"
+    headers = ["Fee Head", current_header, previous_header, last_year_header, uncleared_header]
     excel_rows = [
         {
             "Fee Head": fee_head,
             current_header: values[0],
             previous_header: values[1],
             last_year_header: values[2],
+            uncleared_header: values[3],
         }
         for fee_head, values in sorted(grouped.items())
     ]
-    totals = [sum(values[index] for values in grouped.values()) for index in range(3)]
-    excel_rows.append({"Fee Head": "TOTAL", current_header: totals[0], previous_header: totals[1], last_year_header: totals[2]})
+    totals = [sum(values[index] for values in grouped.values()) for index in range(4)]
+    excel_rows.append({"Fee Head": "TOTAL", current_header: totals[0], previous_header: totals[1], last_year_header: totals[2], uncleared_header: totals[3]})
 
     title = f"Comparative Collection Report — {current_label}"
     stem = f"comparative_{year}_{month:02d}"
@@ -674,10 +700,10 @@ def comparative_report(conn, year, month) -> str:
     story: list = []
     _header(story, conn, title)
     table_data = [headers] + [
-        [row["Fee Head"], format_currency(row[current_header]), format_currency(row[previous_header]), format_currency(row[last_year_header])]
+        [row["Fee Head"], format_currency(row[current_header]), format_currency(row[previous_header]), format_currency(row[last_year_header]), format_currency(row[uncleared_header])]
         for row in excel_rows
     ]
-    story.append(_table(table_data, [65 * mm, 35 * mm, 35 * mm, 35 * mm], 7.2, right_columns=(1, 2, 3)))
+    story.append(_table(table_data, [50 * mm, 30 * mm, 30 * mm, 30 * mm, 30 * mm], 6.5, right_columns=(1, 2, 3, 4)))
     _document(pdf_path, title).build(story)
     export_to_excel(
         excel_rows,
@@ -811,7 +837,7 @@ def transfer_certificate(conn, student_id, override_dues=False, override_reason=
         ("id", "name", "class", "section", "guardian_name", "created_at"), student
     ))
     payment_summary = conn.execute(
-        "SELECT COUNT(*),COALESCE(SUM(amount_paid),0) FROM payments WHERE student_id=?",
+        "SELECT COUNT(*),COALESCE(SUM(CASE WHEN note LIKE 'VOID of %' THEN amount_paid WHEN UPPER(payment_mode)<>'CHEQUE' OR cheque_status='CLEARED' THEN amount_paid ELSE 0 END),0) FROM payments WHERE student_id=?",
         (student_id,),
     ).fetchone()
     payment_count = int(payment_summary[0] or 0)

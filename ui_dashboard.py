@@ -49,7 +49,7 @@ def load_cashflow_summary(conn) -> tuple[str, list[tuple[str, float]]]:
             cursor_month += 1
     totals = {key: 0.0 for key in month_keys}
     for payment_date, amount_paid in conn.execute(
-        "SELECT p.payment_date,a.amount_allocated FROM payment_allocations a JOIN payments p ON p.id=a.payment_id JOIN student_charges c ON c.id=a.charge_id WHERE c.academic_year=?",
+        "SELECT CASE WHEN UPPER(p.payment_mode)='CHEQUE' AND p.cheque_status='CLEARED' THEN p.cheque_cleared_date ELSE p.payment_date END,CASE WHEN a.allocation_type='REVERSAL' THEN -a.amount_allocated WHEN UPPER(p.payment_mode)<>'CHEQUE' OR p.cheque_status='CLEARED' THEN a.amount_allocated ELSE 0 END FROM payment_allocations a JOIN payments p ON p.id=a.payment_id JOIN student_charges c ON c.id=a.charge_id WHERE c.academic_year=?",
         (label,),
     ):
         parsed = _parse_date(payment_date)
@@ -152,6 +152,7 @@ class DashboardWindow(tk.Toplevel):
         if auth.CURRENT_SESSION is not None and auth.CURRENT_SESSION.role == "ADMIN":
             ttk.Button(button_frame, text=label("receipt_reprint", self.language), command=self._on_receipt_reprint_click).pack(fill="x", pady=5)
             ttk.Button(button_frame, text=label("void_payment", self.language), command=self._on_void_payment_click).pack(fill="x", pady=5)
+            ttk.Button(button_frame, text="Cheque Management", command=self._on_cheques_click).pack(fill="x", pady=5)
             ttk.Button(button_frame, text=label("audit_log", self.language), command=self._on_audit_log_click).pack(fill="x", pady=5)
             ttk.Button(button_frame, text=label("fee_notices", self.language), command=self._on_fee_notices_click).pack(fill="x", pady=5)
             ttk.Button(button_frame, text=label("user_management", self.language), command=self._on_users_click).pack(fill="x", pady=5)
@@ -405,6 +406,13 @@ class DashboardWindow(tk.Toplevel):
         from ui_void_payment import VoidPaymentWindow
 
         VoidPaymentWindow(self)
+
+    def _on_cheques_click(self) -> None:
+        """Open the administrator cheque lifecycle screen."""
+        auth.touch_session()
+        from ui_cheques import ChequeManagementWindow
+
+        ChequeManagementWindow(self)
 
     def _on_audit_log_click(self) -> None:
         """Touch the session and open the administrator audit viewer."""

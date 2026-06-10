@@ -107,6 +107,11 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             payment_mode TEXT,
             note TEXT,
             hash TEXT,
+            cheque_number TEXT,
+            upi_reference TEXT,
+            cheque_status TEXT CHECK(cheque_status IN ('PENDING','CLEARED','BOUNCED','CANCELLED') OR cheque_status IS NULL),
+            cheque_cleared_date TEXT,
+            cheque_bank_reference TEXT,
             FOREIGN KEY (student_id) REFERENCES students(id),
             FOREIGN KEY (fee_head_id) REFERENCES fee_heads(id),
             FOREIGN KEY (collected_by) REFERENCES users(id)
@@ -347,6 +352,7 @@ def _seed_first_run(conn: sqlite3.Connection) -> None:
 def init_db() -> None:
     """Initialize the SQLite database, triggers, seed data, and charge ledger."""
     from ledger import migrate_legacy_ledger
+    from payment_controls import migrate_payment_controls
 
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
@@ -354,4 +360,5 @@ def init_db() -> None:
         _create_tables(conn)
         _create_triggers(conn)
         _seed_first_run(conn)
+        migrate_payment_controls(conn)
         migrate_legacy_ledger(conn)

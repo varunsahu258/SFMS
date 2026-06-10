@@ -33,6 +33,11 @@ def active_academic_year(conn: sqlite3.Connection) -> str:
 
 def install_ledger_schema(conn: sqlite3.Connection) -> None:
     """Install charge/allocation tables, constraints, views, and legacy columns."""
+    # Earlier builds represented reversals as negative allocations. Normalize them
+    # before reinstating immutability triggers so all current reversals are positive.
+    if "payment_allocations" in {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}:
+        conn.execute("DROP TRIGGER IF EXISTS trg_allocations_no_update")
+        conn.execute("UPDATE payment_allocations SET amount_allocated=ABS(amount_allocated) WHERE allocation_type='REVERSAL' AND amount_allocated<0")
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS student_charges (
@@ -104,14 +109,9 @@ def install_ledger_schema(conn: sqlite3.Connection) -> None:
                 WHERE p.id=NEW.payment_id AND c.id=NEW.charge_id
             ) THEN RAISE(ABORT, 'payment allocation does not match charge') END;
             SELECT CASE WHEN NEW.allocation_type <> 'REVERSAL' AND NEW.amount_allocated >
-                COALESCE((SELECT original_amount
-                          - COALESCE((SELECT SUM(CASE WHEN allocation_type <> 'REVERSAL' THEN amount_allocated ELSE 0 END)
-                                      FROM payment_allocations WHERE charge_id=NEW.charge_id),0)
-                          - COALESCE((SELECT SUM(amount) FROM charge_adjustments WHERE charge_id=NEW.charge_id),0)
-                          + COALESCE((SELECT SUM(CASE WHEN allocation_type = 'REVERSAL' THEN ABS(amount_allocated) ELSE 0 END)
-                                      FROM payment_allocations WHERE charge_id=NEW.charge_id),0)
-                          FROM student_charges WHERE id=NEW.charge_id),0) + 0.005
-                THEN RAISE(ABORT, 'payment allocation exceeds charge balance') END;
+                COALESCE((SELECT balance-pending_cheques FROM charge_ledger
+                          WHERE charge_id=NEW.charge_id),0) + 0.005
+                THEN RAISE(ABORT, 'payment allocation exceeds available charge balance') END;
             SELECT CASE WHEN NEW.allocation_type = 'REVERSAL' AND NEW.amount_allocated >
                 COALESCE((SELECT
                     COALESCE(SUM(CASE WHEN allocation_type <> 'REVERSAL' THEN amount_allocated ELSE 0 END),0)
@@ -147,33 +147,39 @@ def install_ledger_schema(conn: sqlite3.Connection) -> None:
 
         DROP VIEW IF EXISTS charge_ledger;
         CREATE VIEW charge_ledger AS
-        SELECT c.id AS charge_id, c.student_id, c.academic_year,
-               c.fee_structure_id, c.fee_head_id, c.original_amount, c.due_date,
-               c.status,
-               COALESCE((SELECT SUM(CASE WHEN a.allocation_type <> 'REVERSAL'
-                                         THEN a.amount_allocated ELSE 0 END)
-                         FROM payment_allocations a WHERE a.charge_id=c.id), 0) AS paid,
-               COALESCE((SELECT SUM(CASE WHEN a.allocation_type = 'REVERSAL'
-                                         THEN ABS(a.amount_allocated) ELSE 0 END)
-                         FROM payment_allocations a WHERE a.charge_id=c.id), 0) AS reversed,
-               COALESCE((SELECT SUM(CASE WHEN x.adjustment_type='DISCOUNT' THEN x.amount ELSE 0 END)
-                         FROM charge_adjustments x WHERE x.charge_id=c.id), 0) AS discounts,
-               COALESCE((SELECT SUM(CASE WHEN x.adjustment_type='EXEMPTION' THEN x.amount ELSE 0 END)
-                         FROM charge_adjustments x WHERE x.charge_id=c.id), 0) AS exemptions,
-               COALESCE((SELECT SUM(x.amount)
-                         FROM charge_adjustments x WHERE x.charge_id=c.id), 0) AS adjustments,
-               c.original_amount
-                 - COALESCE((SELECT SUM(CASE WHEN a.allocation_type <> 'REVERSAL'
-                                             THEN a.amount_allocated ELSE 0 END)
-                             FROM payment_allocations a WHERE a.charge_id=c.id), 0)
-                 - COALESCE((SELECT SUM(CASE WHEN x.adjustment_type='DISCOUNT' THEN x.amount ELSE 0 END)
-                             FROM charge_adjustments x WHERE x.charge_id=c.id), 0)
-                 - COALESCE((SELECT SUM(CASE WHEN x.adjustment_type='EXEMPTION' THEN x.amount ELSE 0 END)
-                             FROM charge_adjustments x WHERE x.charge_id=c.id), 0)
-                 + COALESCE((SELECT SUM(CASE WHEN a.allocation_type = 'REVERSAL'
-                                             THEN ABS(a.amount_allocated) ELSE 0 END)
-                             FROM payment_allocations a WHERE a.charge_id=c.id), 0) AS balance
-        FROM student_charges c;
+        WITH allocation_totals AS (
+            SELECT a.charge_id,
+                   SUM(CASE WHEN a.allocation_type <> 'REVERSAL'
+                                  AND (UPPER(COALESCE(p.payment_mode,'')) <> 'CHEQUE'
+                                       OR p.cheque_status='CLEARED')
+                            THEN a.amount_allocated ELSE 0 END) AS successful_paid,
+                   SUM(CASE WHEN a.allocation_type='REVERSAL'
+                            THEN ABS(a.amount_allocated) ELSE 0 END) AS reversed,
+                   SUM(CASE WHEN a.allocation_type <> 'REVERSAL'
+                                  AND UPPER(COALESCE(p.payment_mode,''))='CHEQUE'
+                                  AND p.cheque_status='PENDING'
+                            THEN a.amount_allocated ELSE 0 END) AS pending_cheques
+            FROM payment_allocations a JOIN payments p ON p.id=a.payment_id
+            GROUP BY a.charge_id
+        ), adjustment_totals AS (
+            SELECT charge_id,
+                   SUM(CASE WHEN adjustment_type='DISCOUNT' THEN amount ELSE 0 END) AS discounts,
+                   SUM(CASE WHEN adjustment_type='EXEMPTION' THEN amount ELSE 0 END) AS exemptions
+            FROM charge_adjustments GROUP BY charge_id
+        )
+        SELECT c.id AS charge_id,c.student_id,c.academic_year,c.fee_structure_id,
+               c.fee_head_id,c.original_amount,c.due_date,c.status,
+               COALESCE(a.successful_paid,0) AS paid,
+               COALESCE(a.reversed,0) AS reversed,
+               COALESCE(a.pending_cheques,0) AS pending_cheques,
+               COALESCE(x.discounts,0) AS discounts,
+               COALESCE(x.exemptions,0) AS exemptions,
+               COALESCE(x.discounts,0)+COALESCE(x.exemptions,0) AS adjustments,
+               c.original_amount-COALESCE(a.successful_paid,0)-COALESCE(x.discounts,0)
+                 -COALESCE(x.exemptions,0)+COALESCE(a.reversed,0) AS balance
+        FROM student_charges c
+        LEFT JOIN allocation_totals a ON a.charge_id=c.id
+        LEFT JOIN adjustment_totals x ON x.charge_id=c.id;
         """
     )
     if "academic_year" not in _columns(conn, "discounts"):
@@ -288,7 +294,7 @@ def allocate_payment(
         if row is None or amount > float(row[0] or 0) - float(row[1] or 0) + 0.005:
             raise ValueError("Reversal exceeds the charge's allocated payments.")
     else:
-        balance_row = conn.execute("SELECT balance FROM charge_ledger WHERE charge_id=?", (charge_id,)).fetchone()
+        balance_row = conn.execute("SELECT balance-pending_cheques FROM charge_ledger WHERE charge_id=?", (charge_id,)).fetchone()
         if balance_row is None or amount > float(balance_row[0] or 0) + 0.005:
             raise ValueError("Payment allocation exceeds the charge's outstanding balance.")
     conn.execute(
