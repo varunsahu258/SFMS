@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import os
 import re
 import sqlite3
 import tkinter as tk
 from datetime import datetime, timedelta
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import auth
 from config import SPLASH_BG, SPLASH_FG, STATUS_ACTIVE
+from ledger import active_academic_year, all_outstanding_total, charge_rows
 from ui_master_utils import audit, connect_db, ensure_admin_write
-from utils import now_str
+from utils import format_currency, now_str
 
 CLASS_MAP = {
     "NUR": "Nursery",
@@ -68,6 +70,51 @@ AADHAAR_RE = re.compile(r"^\d{12}$")
 PHONE_RE = re.compile(r"^\d{10}$")
 
 
+def student_dues_rows(conn: sqlite3.Connection, student_id: int) -> list[dict]:
+    """Return authoritative active-year itemized dues for one student."""
+    rows = charge_rows(conn, student_id, active_academic_year(conn))
+    return [
+        {
+            "fee_head": row["fee_head"],
+            "amount_due": float(row["original_amount"] or 0),
+            "paid": float(row["paid"] or 0),
+            "adjustments": float(row["adjustments"] or 0),
+            "balance": float(row["balance"] or 0),
+        }
+        for row in rows if float(row["balance"] or 0) > 0
+    ]
+
+
+def issue_student_tc(conn: sqlite3.Connection, student_id: int, override_dues=False, override_reason="") -> str:
+    """Generate a TC and archive the student without deleting history."""
+    from report_generator import transfer_certificate
+
+    old_row = conn.execute("SELECT * FROM students WHERE id = ?", (student_id,)).fetchone()
+    if old_row is None:
+        raise ValueError("Student was not found.")
+    old = dict(old_row) if hasattr(old_row, "keys") else {"id": student_id}
+    path = transfer_certificate(conn, student_id, override_dues, override_reason)
+    conn.execute("UPDATE students SET status = 'LEFT', is_active = 0 WHERE id = ?", (student_id,))
+    audit(
+        conn, "STUDENT_LEFT", "students", student_id, old,
+        {"status": "LEFT", "is_active": 0, "tc_issued": True},
+    )
+    return path
+
+
+def reactivate_student(conn: sqlite3.Connection, student_id: int, reason: str) -> None:
+    """Reactivate an archived student and audit the mandatory reason."""
+    reason = str(reason or "").strip()
+    if not reason:
+        raise ValueError("A reason is mandatory.")
+    row = conn.execute("SELECT * FROM students WHERE id = ?", (student_id,)).fetchone()
+    if row is None:
+        raise ValueError("Student was not found.")
+    old = dict(row) if hasattr(row, "keys") else {"id": student_id}
+    conn.execute("UPDATE students SET status = 'ACTIVE', is_active = 1 WHERE id = ?", (student_id,))
+    audit(conn, "STUDENT_REACTIVATE", "students", student_id, old, {"status": "ACTIVE", "is_active": 1, "reason": reason})
+
+
 class StudentWindow(tk.Toplevel):
     """Admin-only student management window."""
 
@@ -76,7 +123,7 @@ class StudentWindow(tk.Toplevel):
         """Create the student management window."""
         super().__init__(master)
         self.title("Students")
-        self.geometry("920x560")
+        self.geometry("1240x620")
         self.configure(bg=SPLASH_BG)
         self.search_var = tk.StringVar()
         self._ensure_import_columns()
@@ -99,7 +146,7 @@ class StudentWindow(tk.Toplevel):
                     conn.execute(f"ALTER TABLE students ADD COLUMN {column} {ddl}")
 
     def _build_widgets(self) -> None:
-        """Build search, tree, and action controls."""
+        """Build shared search, active/archive tabs, and actions."""
         top = tk.Frame(self, bg=SPLASH_BG)
         top.pack(fill="x", padx=12, pady=10)
         tk.Label(top, text="Search", bg=SPLASH_BG, fg=SPLASH_FG).pack(side="left")
@@ -108,50 +155,112 @@ class StudentWindow(tk.Toplevel):
         entry.bind("<KeyRelease>", lambda _event: self.refresh())
         ttk.Button(top, text="Clear", command=self._clear_search).pack(side="left")
 
+        self.notebook = ttk.Notebook(self)
+        self.notebook.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+        active_tab = tk.Frame(self.notebook, bg=SPLASH_BG)
+        archive_tab = tk.Frame(self.notebook, bg=SPLASH_BG)
+        self.notebook.add(active_tab, text="Students")
+        self.notebook.add(archive_tab, text="Archived Students")
+
         columns = ("id", "name", "class", "section", "phone", "status")
-        self.tree = ttk.Treeview(self, columns=columns, show="headings")
+        self.tree = ttk.Treeview(active_tab, columns=columns, show="headings", selectmode="extended")
         for column, heading, width in (
-            ("id", "ID", 60), ("name", "Name", 260), ("class", "Class", 120),
+            ("id", "ID", 60), ("name", "Name", 250), ("class", "Class", 120),
             ("section", "Section", 90), ("phone", "Phone", 120), ("status", "Status", 100),
         ):
             self.tree.heading(column, text=heading)
             self.tree.column(column, width=width)
-        self.tree.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+        self.tree.pack(fill="both", expand=True)
         self.tree.bind("<Double-1>", lambda _event: self.edit_selected())
+
+        archived_columns = ("name", "class", "left_on", "tc_issued", "total_paid")
+        self.archived_tree = ttk.Treeview(archive_tab, columns=archived_columns, show="headings", selectmode="extended")
+        for column, heading, width in (
+            ("name", "Name", 250), ("class", "Class", 130),
+            ("left_on", "Left On", 145), ("tc_issued", "TC Issued", 100),
+            ("total_paid", "Total Paid", 130),
+        ):
+            self.archived_tree.heading(column, text=heading)
+            self.archived_tree.column(column, width=width)
+        self.archived_tree.pack(fill="both", expand=True)
+        ttk.Button(archive_tab, text="Reactivate", command=self.reactivate_archived).pack(pady=8)
 
         buttons = tk.Frame(self, bg=SPLASH_BG)
         buttons.pack(fill="x", padx=12, pady=(0, 12))
         for text, command in (
             ("Add Student", self.add_student), ("Edit", self.edit_selected),
             ("Deactivate", self.deactivate_selected), ("Mark as Left", self.mark_left_selected),
+            ("Transfer Certificate", self.transfer_certificate_selected),
+            ("ID Card", self.generate_id_cards), ("Select All in Class", self.select_all_in_class),
             ("Bulk Import", self.bulk_import), ("Promote Class", self.promote_class),
         ):
-            ttk.Button(buttons, text=text, command=command).pack(side="left", padx=4)
+            button = ttk.Button(buttons, text=text, command=command)
+            button.pack(side="left", padx=3)
+            if text == "Transfer Certificate":
+                self.tc_button = button
+        self.tree.bind("<<TreeviewSelect>>", lambda _event: self._update_tc_button())
+        self._update_tc_button()
+
+    def _update_tc_button(self) -> None:
+        """Enable TC issuance only for one selected ACTIVE student."""
+        selected = self.tree.selection()
+        enabled = False
+        if len(selected) == 1:
+            values = self.tree.item(selected[0], "values")
+            enabled = bool(values and values[5] == "ACTIVE")
+        self.tc_button.configure(state="normal" if enabled else "disabled")
 
     def _clear_search(self) -> None:
-        """Clear the search field and reload students."""
+        """Clear the shared active/archive search and reload both tabs."""
         auth.touch_session()
         self.search_var.set("")
         self.refresh()
 
     def refresh(self) -> None:
-        """Reload the student list from the database."""
+        """Reload active and archived student lists using the shared search."""
         auth.touch_session()
-        for item in self.tree.get_children():
-            self.tree.delete(item)
+        for tree in (self.tree, self.archived_tree):
+            for item in tree.get_children():
+                tree.delete(item)
         term = f"%{self.search_var.get().strip()}%"
         with connect_db() as conn:
-            rows = conn.execute(
+            active_rows = conn.execute(
                 """
-                SELECT id, name, class, section, phone, status
+                SELECT id, name, class, section, phone,
+                       CASE WHEN is_active = 1 THEN status ELSE 'INACTIVE' END AS status
                 FROM students
-                WHERE name LIKE ? OR class LIKE ? OR aadhaar LIKE ?
+                WHERE status <> 'LEFT' AND (name LIKE ? OR class LIKE ? OR aadhaar LIKE ?)
                 ORDER BY class, name
                 """,
                 (term, term, term),
             ).fetchall()
-        for row in rows:
+            archived_rows = conn.execute(
+                """
+                SELECT s.id, s.name, s.class,
+                       COALESCE((
+                           SELECT a.timestamp FROM audit_log a
+                           WHERE a.record_id = CAST(s.id AS TEXT)
+                             AND a.action IN ('STUDENT_LEFT', 'TC_ISSUED')
+                           ORDER BY a.id DESC LIMIT 1
+                       ), '') AS left_on,
+                       CASE WHEN EXISTS (
+                           SELECT 1 FROM audit_log a
+                           WHERE a.record_id = CAST(s.id AS TEXT) AND a.action = 'TC_ISSUED'
+                       ) THEN 'Yes' ELSE 'No' END AS tc_issued,
+                       COALESCE((SELECT SUM(CASE WHEN p.note LIKE 'VOID of %' THEN p.amount_paid WHEN UPPER(p.payment_mode)<>'CHEQUE' OR p.cheque_status='CLEARED' THEN p.amount_paid ELSE 0 END) FROM payments p WHERE p.student_id=s.id),0) AS total_paid
+                FROM students s
+                WHERE s.status = 'LEFT' AND (s.name LIKE ? OR s.class LIKE ? OR s.aadhaar LIKE ?)
+                ORDER BY s.class, s.name
+                """,
+                (term, term, term),
+            ).fetchall()
+        for row in active_rows:
             self.tree.insert("", "end", iid=str(row["id"]), values=tuple(row))
+        for row in archived_rows:
+            self.archived_tree.insert(
+                "", "end", iid=str(row["id"]),
+                values=(row["name"], row["class"], row["left_on"], row["tc_issued"], format_currency(row["total_paid"] or 0)),
+            )
 
     def _selected_id(self) -> int | None:
         """Return the selected student id, if any."""
@@ -180,7 +289,7 @@ class StudentWindow(tk.Toplevel):
         if student_id is None or not ensure_admin_write():
             return
         with connect_db() as conn:
-            due = conn.execute("SELECT COALESCE(SUM(balance), 0) FROM payments WHERE student_id = ?", (student_id,)).fetchone()[0]
+            due = all_outstanding_total(conn, student_id)
             if due and not messagebox.askyesno("Unpaid dues", f"Student has unpaid dues of Rs. {due:,.2f}. Deactivate anyway?"):
                 return
             old = dict(conn.execute("SELECT * FROM students WHERE id = ?", (student_id,)).fetchone())
@@ -195,13 +304,96 @@ class StudentWindow(tk.Toplevel):
         if student_id is None or not ensure_admin_write():
             return
         with connect_db() as conn:
-            due = conn.execute("SELECT COALESCE(SUM(balance), 0) FROM payments WHERE student_id = ?", (student_id,)).fetchone()[0]
+            due = all_outstanding_total(conn, student_id)
             if due > 0:
                 messagebox.showerror("Cannot mark left", f"Student has unpaid dues of Rs. {due:,.2f}.")
                 return
             old = dict(conn.execute("SELECT * FROM students WHERE id = ?", (student_id,)).fetchone())
             conn.execute("UPDATE students SET status = 'LEFT', is_active = 0 WHERE id = ?", (student_id,))
             audit(conn, "STUDENT_LEFT", "students", student_id, old, {"status": "LEFT", "is_active": 0})
+        self.refresh()
+
+    def _selected_ids(self) -> list[int]:
+        """Return all selected active student IDs."""
+        return [int(item) for item in self.tree.selection()]
+
+    @auth.require_role("ADMIN")
+    def transfer_certificate_selected(self) -> None:
+        """Issue a TC for one active student, requesting override when required."""
+        selected = self._selected_ids()
+        if len(selected) != 1:
+            messagebox.showwarning("Transfer Certificate", "Select exactly one active student.", parent=self)
+            return
+        student_id = selected[0]
+        with connect_db() as conn:
+            student = conn.execute("SELECT is_active, status FROM students WHERE id = ?", (student_id,)).fetchone()
+            if student is None or not student["is_active"] or student["status"] != "ACTIVE":
+                messagebox.showerror("Transfer Certificate", "TC is enabled only for ACTIVE students.", parent=self)
+                return
+            total_dues = float(all_outstanding_total(conn, student_id) or 0)
+            if total_dues > 0:
+                DuesClearanceDialog(self, student_id, on_issued=self._tc_issued)
+                return
+            try:
+                path = issue_student_tc(conn, student_id)
+            except Exception as exc:
+                messagebox.showerror("Transfer Certificate", str(exc), parent=self)
+                return
+        self._tc_issued(path)
+
+    def _tc_issued(self, path: str) -> None:
+        """Refresh the archive and open a generated transfer certificate."""
+        self.refresh()
+        if hasattr(os, "startfile"):
+            os.startfile(path)
+        messagebox.showinfo("Transfer Certificate", f"TC saved to:\n{path}", parent=self)
+
+    def select_all_in_class(self) -> None:
+        """Select every visible active student in the focused student's class."""
+        focused = self.tree.focus() or (self.tree.selection()[0] if self.tree.selection() else "")
+        if not focused:
+            messagebox.showwarning("ID Cards", "Select one student to identify the class.", parent=self)
+            return
+        class_name = self.tree.item(focused, "values")[2]
+        matches = [item for item in self.tree.get_children() if self.tree.item(item, "values")[2] == class_name]
+        self.tree.selection_set(matches)
+
+    def generate_id_cards(self) -> None:
+        """Generate privacy-safe ID cards for all selected active students."""
+        selected = self._selected_ids()
+        if not selected:
+            messagebox.showwarning("ID Cards", "Select one or more students.", parent=self)
+            return
+        if not messagebox.askyesno("ID Cards", f"Generate ID cards for {len(selected)} students?", parent=self):
+            return
+        try:
+            from report_generator import student_id_card
+            with connect_db() as conn:
+                path = student_id_card(conn, selected)
+        except Exception as exc:
+            messagebox.showerror("ID Cards", str(exc), parent=self)
+            return
+        if hasattr(os, "startfile"):
+            os.startfile(path)
+        messagebox.showinfo("ID Cards", f"ID cards saved to:\n{path}", parent=self)
+
+    @auth.require_role("ADMIN")
+    def reactivate_archived(self) -> None:
+        """Reactivate one archived student with a mandatory audited reason."""
+        selected = self.archived_tree.selection()
+        if len(selected) != 1:
+            messagebox.showwarning("Reactivate", "Select exactly one archived student.", parent=self)
+            return
+        reason = simpledialog.askstring("Reactivate Student", "Reason for reactivation:", parent=self)
+        if reason is None:
+            return
+        reason = reason.strip()
+        if not reason:
+            messagebox.showerror("Reactivate", "A reason is mandatory.", parent=self)
+            return
+        student_id = int(selected[0])
+        with connect_db() as conn:
+            reactivate_student(conn, student_id, reason)
         self.refresh()
 
     @auth.require_role("ADMIN")
@@ -213,6 +405,54 @@ class StudentWindow(tk.Toplevel):
     def promote_class(self) -> None:
         """Open the class-promotion dialog."""
         PromoteClassDialog(self, on_saved=self.refresh)
+
+
+class DuesClearanceDialog(tk.Toplevel):
+    """Show itemized dues and permit an administrator TC override."""
+
+    def __init__(self, master, student_id: int, on_issued=None):
+        super().__init__(master)
+        self.student_id = student_id
+        self.on_issued = on_issued
+        self.reason_var = tk.StringVar()
+        self.title("Dues Clearance for Transfer Certificate")
+        self.geometry("720x430")
+        self.transient(master)
+        self.grab_set()
+        columns = ("fee_head", "amount_due", "paid", "balance")
+        tree = ttk.Treeview(self, columns=columns, show="headings", height=11)
+        for column, heading, width in (("fee_head", "Fee Head", 220), ("amount_due", "Amount Due", 140), ("paid", "Paid", 130), ("balance", "Balance", 140)):
+            tree.heading(column, text=heading)
+            tree.column(column, width=width)
+        with connect_db() as conn:
+            rows = student_dues_rows(conn, student_id)
+        for row in rows:
+            tree.insert("", "end", values=(row["fee_head"], format_currency(row["amount_due"]), format_currency(row["paid"]), format_currency(row["balance"])))
+        tree.pack(fill="both", expand=True, padx=12, pady=12)
+        reason = tk.Frame(self)
+        reason.pack(fill="x", padx=12)
+        tk.Label(reason, text="Override Reason").pack(side="left")
+        ttk.Entry(reason, textvariable=self.reason_var).pack(side="left", padx=8, fill="x", expand=True)
+        buttons = tk.Frame(self)
+        buttons.pack(pady=12)
+        ttk.Button(buttons, text="Override and Issue TC", command=self.issue).pack(side="left", padx=5)
+        ttk.Button(buttons, text="Cancel", command=self.destroy).pack(side="left", padx=5)
+
+    @auth.require_role("ADMIN")
+    def issue(self) -> None:
+        reason = self.reason_var.get().strip()
+        if not reason:
+            messagebox.showerror("Dues Override", "A reason is mandatory.", parent=self)
+            return
+        try:
+            with connect_db() as conn:
+                path = issue_student_tc(conn, self.student_id, True, reason)
+        except Exception as exc:
+            messagebox.showerror("Transfer Certificate", str(exc), parent=self)
+            return
+        self.destroy()
+        if self.on_issued:
+            self.on_issued(path)
 
 
 class StudentDialog(tk.Toplevel):
