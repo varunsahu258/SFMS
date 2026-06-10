@@ -50,10 +50,13 @@ def _receipt_data(conn, receipt_no: str) -> dict:
 
     payment_cursor = conn.execute(
         """
-        SELECT p.id, p.fee_head_id, p.amount_due, p.amount_paid, p.balance,
+        SELECT p.id, p.fee_head_id, COALESCE(l.original_amount,p.amount_due) AS amount_due,
+               p.amount_paid, COALESCE(l.balance,0) AS balance,
                p.payment_date, p.payment_mode, p.note, fh.name AS fee_head,
                u.username AS collected_by_name, ct.cheque_no, ct.bank
         FROM payments p
+        LEFT JOIN payment_allocations pa ON pa.payment_id=p.id
+        LEFT JOIN charge_ledger l ON l.charge_id=pa.charge_id
         LEFT JOIN fee_heads fh ON fh.id = p.fee_head_id
         LEFT JOIN users u ON u.id = p.collected_by
         LEFT JOIN cheque_tracker ct ON ct.payment_id = p.id

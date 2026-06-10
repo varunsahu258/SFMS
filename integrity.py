@@ -43,14 +43,18 @@ def _receipt_hash(conn: sqlite3.Connection, receipt_no: str) -> str | None:
         expected_payment_hash = compute_hash(receipt_no, row_student_id, amount_paid, _row_value(row, "payment_date", 4))
         allocations = conn.execute(
             """
-            SELECT a.amount_allocated,c.student_id,c.fee_head_id
+            SELECT a.amount_allocated,a.allocation_type,c.student_id,c.fee_head_id
             FROM payment_allocations a JOIN student_charges c ON c.id=a.charge_id
             WHERE a.payment_id=?
             """, (payment_id,)
         ).fetchall()
-        if not allocations or abs(sum(float(item[0]) for item in allocations)-amount_paid) > 0.005:
+        allocated_total = sum(
+            -abs(float(item[0])) if item[1] == "REVERSAL" else float(item[0])
+            for item in allocations
+        )
+        if not allocations or abs(allocated_total-amount_paid) > 0.005:
             return None
-        if any(item[1] != row_student_id or item[2] != fee_head_id for item in allocations):
+        if any(item[2] != row_student_id or item[3] != fee_head_id for item in allocations):
             return None
         if stored_payment_hash != expected_payment_hash:
             return None

@@ -332,7 +332,8 @@ class CollectionBaseWindow(tk.Toplevel):
             for item in payable:
                 amount_due = float(item["amount_due"])
                 amount_paid = float(item["amount_paying"])
-                balance = amount_due - amount_paid
+                # Legacy payments.balance is not authoritative; charge_ledger derives outstanding.
+                balance = 0.0
                 payment_hash = compute_hash(receipt_no, self.selected_student_id, amount_paid, payment_date)
                 cursor = conn.execute(
                     """

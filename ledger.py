@@ -55,7 +55,7 @@ def install_ledger_schema(conn: sqlite3.Connection) -> None:
             id INTEGER PRIMARY KEY,
             payment_id INTEGER NOT NULL,
             charge_id INTEGER NOT NULL,
-            amount_allocated REAL NOT NULL CHECK(amount_allocated <> 0),
+            amount_allocated REAL NOT NULL CHECK(amount_allocated > 0),
             allocation_type TEXT NOT NULL DEFAULT 'PAYMENT'
                 CHECK(allocation_type IN ('PAYMENT','ADVANCE','REVERSAL','MIGRATION')),
             created_at TEXT NOT NULL,
@@ -93,19 +93,31 @@ def install_ledger_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_allocations_payment ON payment_allocations(payment_id);
         CREATE INDEX IF NOT EXISTS idx_adjustments_charge ON charge_adjustments(charge_id);
 
-        CREATE TRIGGER IF NOT EXISTS trg_allocations_validate_insert
+        DROP TRIGGER IF EXISTS trg_allocations_validate_insert;
+        CREATE TRIGGER trg_allocations_validate_insert
         BEFORE INSERT ON payment_allocations BEGIN
+            SELECT CASE WHEN NEW.amount_allocated <= 0
+                THEN RAISE(ABORT, 'allocation amount must be positive') END;
             SELECT CASE WHEN NOT EXISTS (
                 SELECT 1 FROM payments p JOIN student_charges c
                   ON c.student_id=p.student_id AND c.fee_head_id=p.fee_head_id
                 WHERE p.id=NEW.payment_id AND c.id=NEW.charge_id
             ) THEN RAISE(ABORT, 'payment allocation does not match charge') END;
-            SELECT CASE WHEN NEW.amount_allocated > 0 AND NEW.amount_allocated >
+            SELECT CASE WHEN NEW.allocation_type <> 'REVERSAL' AND NEW.amount_allocated >
                 COALESCE((SELECT original_amount
-                          - COALESCE((SELECT SUM(amount_allocated) FROM payment_allocations WHERE charge_id=NEW.charge_id),0)
+                          - COALESCE((SELECT SUM(CASE WHEN allocation_type <> 'REVERSAL' THEN amount_allocated ELSE 0 END)
+                                      FROM payment_allocations WHERE charge_id=NEW.charge_id),0)
                           - COALESCE((SELECT SUM(amount) FROM charge_adjustments WHERE charge_id=NEW.charge_id),0)
+                          + COALESCE((SELECT SUM(CASE WHEN allocation_type = 'REVERSAL' THEN ABS(amount_allocated) ELSE 0 END)
+                                      FROM payment_allocations WHERE charge_id=NEW.charge_id),0)
                           FROM student_charges WHERE id=NEW.charge_id),0) + 0.005
                 THEN RAISE(ABORT, 'payment allocation exceeds charge balance') END;
+            SELECT CASE WHEN NEW.allocation_type = 'REVERSAL' AND NEW.amount_allocated >
+                COALESCE((SELECT
+                    COALESCE(SUM(CASE WHEN allocation_type <> 'REVERSAL' THEN amount_allocated ELSE 0 END),0)
+                    - COALESCE(SUM(CASE WHEN allocation_type = 'REVERSAL' THEN ABS(amount_allocated) ELSE 0 END),0)
+                    FROM payment_allocations WHERE charge_id=NEW.charge_id),0) + 0.005
+                THEN RAISE(ABORT, 'reversal exceeds allocated payments') END;
         END;
         CREATE TRIGGER IF NOT EXISTS trg_allocations_no_update
         BEFORE UPDATE ON payment_allocations BEGIN
@@ -138,15 +150,29 @@ def install_ledger_schema(conn: sqlite3.Connection) -> None:
         SELECT c.id AS charge_id, c.student_id, c.academic_year,
                c.fee_structure_id, c.fee_head_id, c.original_amount, c.due_date,
                c.status,
-               COALESCE((SELECT SUM(a.amount_allocated)
+               COALESCE((SELECT SUM(CASE WHEN a.allocation_type <> 'REVERSAL'
+                                         THEN a.amount_allocated ELSE 0 END)
                          FROM payment_allocations a WHERE a.charge_id=c.id), 0) AS paid,
+               COALESCE((SELECT SUM(CASE WHEN a.allocation_type = 'REVERSAL'
+                                         THEN ABS(a.amount_allocated) ELSE 0 END)
+                         FROM payment_allocations a WHERE a.charge_id=c.id), 0) AS reversed,
+               COALESCE((SELECT SUM(CASE WHEN x.adjustment_type='DISCOUNT' THEN x.amount ELSE 0 END)
+                         FROM charge_adjustments x WHERE x.charge_id=c.id), 0) AS discounts,
+               COALESCE((SELECT SUM(CASE WHEN x.adjustment_type='EXEMPTION' THEN x.amount ELSE 0 END)
+                         FROM charge_adjustments x WHERE x.charge_id=c.id), 0) AS exemptions,
                COALESCE((SELECT SUM(x.amount)
                          FROM charge_adjustments x WHERE x.charge_id=c.id), 0) AS adjustments,
                c.original_amount
-                 - COALESCE((SELECT SUM(a.amount_allocated)
+                 - COALESCE((SELECT SUM(CASE WHEN a.allocation_type <> 'REVERSAL'
+                                             THEN a.amount_allocated ELSE 0 END)
                              FROM payment_allocations a WHERE a.charge_id=c.id), 0)
-                 - COALESCE((SELECT SUM(x.amount)
-                             FROM charge_adjustments x WHERE x.charge_id=c.id), 0) AS balance
+                 - COALESCE((SELECT SUM(CASE WHEN x.adjustment_type='DISCOUNT' THEN x.amount ELSE 0 END)
+                             FROM charge_adjustments x WHERE x.charge_id=c.id), 0)
+                 - COALESCE((SELECT SUM(CASE WHEN x.adjustment_type='EXEMPTION' THEN x.amount ELSE 0 END)
+                             FROM charge_adjustments x WHERE x.charge_id=c.id), 0)
+                 + COALESCE((SELECT SUM(CASE WHEN a.allocation_type = 'REVERSAL'
+                                             THEN ABS(a.amount_allocated) ELSE 0 END)
+                             FROM payment_allocations a WHERE a.charge_id=c.id), 0) AS balance
         FROM student_charges c;
         """
     )
@@ -210,6 +236,14 @@ def charge_rows(
     ).fetchall()
 
 
+def charge_outstanding(conn: sqlite3.Connection, charge_id: int) -> float:
+    """Return a charge's derived balance; payment-row balance snapshots are ignored."""
+    row = conn.execute("SELECT balance FROM charge_ledger WHERE charge_id=?", (charge_id,)).fetchone()
+    if row is None:
+        raise ValueError("Student charge was not found.")
+    return float(row[0] or 0)
+
+
 def outstanding_total(conn: sqlite3.Connection, student_id: int, academic_year: str | None = None) -> float:
     """Return positive outstanding charges without mixing academic years."""
     rows = charge_rows(conn, student_id, academic_year)
@@ -246,7 +280,14 @@ def allocate_payment(
         raise ValueError("Payment or student charge was not found.")
     if payment[0] != charge[0] or payment[1] != charge[1]:
         raise ValueError("Payment allocation does not match the student charge.")
-    if amount > 0:
+    amount = float(amount)
+    if amount <= 0:
+        raise ValueError("Allocation amount must be positive.")
+    if allocation_type == "REVERSAL":
+        row = conn.execute("SELECT paid,reversed FROM charge_ledger WHERE charge_id=?", (charge_id,)).fetchone()
+        if row is None or amount > float(row[0] or 0) - float(row[1] or 0) + 0.005:
+            raise ValueError("Reversal exceeds the charge's allocated payments.")
+    else:
         balance_row = conn.execute("SELECT balance FROM charge_ledger WHERE charge_id=?", (charge_id,)).fetchone()
         if balance_row is None or amount > float(balance_row[0] or 0) + 0.005:
             raise ValueError("Payment allocation exceeds the charge's outstanding balance.")
@@ -379,7 +420,7 @@ def migrate_legacy_ledger(conn: sqlite3.Connection) -> None:
             for allocation in allocations:
                 conn.execute(
                     "INSERT OR IGNORE INTO payment_allocations(payment_id,charge_id,amount_allocated,allocation_type,created_at) VALUES (?,?,?,?,?)",
-                    (payment_id, allocation[0], -float(allocation[1]), "REVERSAL", now_str()),
+                    (payment_id, allocation[0], abs(float(allocation[1])), "REVERSAL", now_str()),
                 )
             continue
         payment_date = payment["payment_date"] if hasattr(payment, "keys") else payment[7]

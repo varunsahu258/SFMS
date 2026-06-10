@@ -130,7 +130,7 @@ class AdvancePaymentWindow(tk.Toplevel):
                     payment_date, collected_by, payment_mode, note, hash
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'CASH', 'ADVANCE', ?)
                 """,
-                (self.selected_student_id, receipt_no, fee_head_id, 0, amount, -amount, payment_date, auth.CURRENT_SESSION.user_id, payment_hash),
+                (self.selected_student_id, receipt_no, fee_head_id, 0, amount, 0, payment_date, auth.CURRENT_SESSION.user_id, payment_hash),
             )
             allocate_payment(conn, cursor.lastrowid, charge_id, amount, "ADVANCE")
             receipt_hash = compute_hash(receipt_no, self.selected_student_id, amount, payment_date)

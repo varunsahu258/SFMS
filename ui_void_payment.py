@@ -31,7 +31,11 @@ def create_void_receipt(
     reason: str,
     user_id: int,
 ) -> str:
-    """Append immutable reversal rows and return the new void receipt number."""
+    """Append positive reversal allocations and return the new void receipt number."""
+    if str(original_receipt.get("receipt_type") or "").upper() == "VOID":
+        raise ValueError("A void receipt cannot itself be voided.")
+    if any(float(payment.get("amount_paid") or 0) <= 0 for payment in original_payments):
+        raise ValueError("Only successful positive payments can be voided.")
     duplicate = conn.execute(
         "SELECT 1 FROM payments WHERE note = ? LIMIT 1",
         (f"VOID of {original_receipt_no}",),
@@ -62,19 +66,19 @@ def create_void_receipt(
             (
                 original["student_id"], void_receipt_no,
                 original["fee_head_id"], abs(float(original["amount_paid"] or 0)),
-                reversed_amount, abs(float(original["amount_paid"] or 0)), payment_date,
+                reversed_amount, 0, payment_date,
                 user_id, original["payment_mode"],
                 f"VOID of {original_receipt_no}", payment_hash,
             ),
         )
         allocations = conn.execute(
-            "SELECT charge_id,amount_allocated FROM payment_allocations WHERE payment_id=?",
+            "SELECT charge_id,amount_allocated FROM payment_allocations WHERE payment_id=? AND allocation_type<>'REVERSAL'",
             (original["id"],),
         ).fetchall()
         if not allocations:
             raise ValueError("Original payment has no charge allocation and cannot be safely voided.")
         for allocation in allocations:
-            allocate_payment(conn, cursor.lastrowid, allocation["charge_id"], -float(allocation["amount_allocated"]), "REVERSAL")
+            allocate_payment(conn, cursor.lastrowid, allocation["charge_id"], abs(float(allocation["amount_allocated"])), "REVERSAL")
         void_payment_ids.append(cursor.lastrowid)
         total_voided += reversed_amount
 
@@ -201,8 +205,12 @@ class VoidPaymentWindow(tk.Toplevel):
                 return
             payments = [dict(row) for row in conn.execute(
                 """
-                SELECT p.*, fh.name AS fee_head
-                FROM payments p LEFT JOIN fee_heads fh ON fh.id = p.fee_head_id
+                SELECT p.*, COALESCE(l.original_amount,p.amount_due) AS derived_amount_due,
+                       COALESCE(l.balance,0) AS derived_balance, fh.name AS fee_head
+                FROM payments p
+                LEFT JOIN payment_allocations pa ON pa.payment_id=p.id
+                LEFT JOIN charge_ledger l ON l.charge_id=pa.charge_id
+                LEFT JOIN fee_heads fh ON fh.id = p.fee_head_id
                 WHERE p.receipt_no = ? ORDER BY p.id
                 """,
                 (receipt_no,),
@@ -225,9 +233,9 @@ class VoidPaymentWindow(tk.Toplevel):
                 "end",
                 values=(
                     payment["fee_head"] or "Fee",
-                    format_currency(payment["amount_due"] or 0),
+                    format_currency(payment["derived_amount_due"] or 0),
                     format_currency(payment["amount_paid"] or 0),
-                    format_currency(payment["balance"] or 0),
+                    format_currency(payment["derived_balance"] or 0),
                     payment["payment_date"] or "",
                     payment["payment_mode"] or "",
                     payment["note"] or "",
