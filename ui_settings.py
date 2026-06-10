@@ -119,6 +119,7 @@ class SettingsWindow(tk.Toplevel):
         self.transient(master)
         self.school_name = tk.StringVar()
         self.school_address = tk.StringVar()
+        self.receipt_issuer_name = tk.StringVar()
         self.logo_path = tk.StringVar()
         self.academic_year = tk.StringVar()
         self.theme = tk.StringVar(value="light")
@@ -139,6 +140,7 @@ class SettingsWindow(tk.Toplevel):
             active = conn.execute("SELECT label FROM academic_years WHERE is_active=1 LIMIT 1").fetchone()
         self.school_name.set(values.get("school_name", ""))
         self.school_address.set(values.get("school_address", ""))
+        self.receipt_issuer_name.set(values.get("receipt_issuer_name", "Sonali Sahu"))
         self.logo_path.set(values.get("logo_path", ""))
         self.theme.set(values.get("ui_theme", "light"))
         self.language.set(values.get("ui_language", "en"))
@@ -173,12 +175,13 @@ class SettingsWindow(tk.Toplevel):
     def _general(self, frame) -> None:
         self._entry(frame, "School name", self.school_name, 0)
         self._entry(frame, "School address", self.school_address, 1)
-        self._entry(frame, "Logo path", self.logo_path, 2)
-        ttk.Button(frame, text="Browse", command=self.choose_logo).grid(row=2, column=2)
+        self._entry(frame, "Receipt issuer / signatory", self.receipt_issuer_name, 2)
+        self._entry(frame, "Logo path", self.logo_path, 3)
+        ttk.Button(frame, text="Browse", command=self.choose_logo).grid(row=3, column=2)
         self.logo_preview = ttk.Label(frame, text="No logo")
-        self.logo_preview.grid(row=3, column=1, sticky="w", pady=8)
-        ttk.Label(frame, text="Active academic year").grid(row=4, column=0, sticky="w", pady=6)
-        ttk.Combobox(frame, textvariable=self.academic_year, values=self.years, state="readonly").grid(row=4, column=1, sticky="w", padx=8)
+        self.logo_preview.grid(row=4, column=1, sticky="w", pady=8)
+        ttk.Label(frame, text="Active academic year").grid(row=5, column=0, sticky="w", pady=6)
+        ttk.Combobox(frame, textvariable=self.academic_year, values=self.years, state="readonly").grid(row=5, column=1, sticky="w", padx=8)
 
     def _appearance(self, frame) -> None:
         ttk.Label(frame, text="Theme", font=("Segoe UI", 11, "bold")).pack(anchor="w")
@@ -294,6 +297,7 @@ class SettingsWindow(tk.Toplevel):
         self.encryption.set(True)
         values = {
             "school_name": self.school_name.get().strip(), "school_address": self.school_address.get().strip(),
+            "receipt_issuer_name": self.receipt_issuer_name.get().strip() or "Sonali Sahu",
             "logo_path": self.logo_path.get().strip(), "ui_theme": self.theme.get(), "ui_language": self.language.get(),
             "session_timeout_minutes": str(self.timeout.get()), "backup_interval_hours": self.backup_interval.get(),
             "backup_encryption_enabled": "1",

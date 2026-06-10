@@ -39,7 +39,7 @@ def _parse_date(value: str) -> datetime | None:
 class AuditLogWindow(tk.Toplevel):
     """Filter, inspect, and export immutable audit-log records."""
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("view_audit_log")
     def __init__(self, master=None):
         """Create the administrator-only audit viewer."""
         super().__init__(master)

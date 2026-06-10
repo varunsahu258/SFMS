@@ -8,7 +8,7 @@ from tkinter import messagebox, ttk
 import auth
 from config import SPLASH_BG, SPLASH_FG
 from ledger import ensure_student_charges
-from ui_master_utils import audit, connect_db, ensure_admin_write
+from ui_master_utils import audit, connect_db, ensure_permission_write
 
 
 class FeeStructureWindow(tk.Toplevel):
@@ -127,10 +127,10 @@ class FeeStructureWindow(tk.Toplevel):
                 self.amount_vars[row["fee_head_id"]].set(f"{amount:.2f}")
                 self.due_vars[row["fee_head_id"]].set(row["due_date"] or "")
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("manage_fee_structure")
     def save(self) -> None:
         """Update or insert all edited fee-structure rows."""
-        if not ensure_admin_write():
+        if not ensure_permission_write("manage_fee_structure"):
             return
         academic_year = self.year_var.get()
         class_name = self.class_var.get()

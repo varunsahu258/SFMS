@@ -6,7 +6,7 @@ import sqlite3
 import threading
 from datetime import datetime
 import tkinter as tk
-from tkinter import ttk
+from tkinter import messagebox, ttk
 
 import auth
 from config import APP_TITLE, DB_PATH, SCHOOL_NAME
@@ -110,8 +110,22 @@ class DashboardWindow(tk.Toplevel):
         self.notification_frame = tk.Frame(self, bg=self._sfms_palette["bg"], height=82)
         self.notification_frame.pack(fill="x", padx=12, pady=(10, 0))
         self.notification_frame.pack_propagate(False)
-        tk.Label(self, text=_configured_school_name(), bg=self._sfms_palette["bg"], fg=self._sfms_palette["fg"], font=("Segoe UI", 18, "bold")).pack(pady=(12, 8))
-        tk.Label(self, text=f"{APP_TITLE} Dashboard", bg=self._sfms_palette["bg"], fg=self._sfms_palette["fg"], font=("Segoe UI", 26, "bold")).pack(pady=(0, 20))
+        header = tk.Frame(self, bg=self._sfms_palette["bg"])
+        header.pack(fill="x", padx=18, pady=(12, 8))
+        title_box = tk.Frame(header, bg=self._sfms_palette["bg"])
+        title_box.pack(side="left", fill="x", expand=True)
+        tk.Label(title_box, text=_configured_school_name(), bg=self._sfms_palette["bg"], fg=self._sfms_palette["fg"], font=("Segoe UI", 18, "bold")).pack(anchor="w")
+        tk.Label(title_box, text=f"{APP_TITLE} Dashboard", bg=self._sfms_palette["bg"], fg=self._sfms_palette["fg"], font=("Segoe UI", 26, "bold")).pack(anchor="w")
+        year_box = tk.Frame(header, bg=self._sfms_palette["bg"])
+        year_box.pack(side="right", anchor="ne", padx=(12, 0))
+        tk.Label(year_box, text="Academic Year", bg=self._sfms_palette["bg"], fg=self._sfms_palette["fg"], font=("Segoe UI", 10, "bold")).pack(anchor="e")
+        self.academic_year_var = tk.StringVar()
+        is_admin = auth.CURRENT_SESSION is not None and auth.CURRENT_SESSION.role == "ADMIN"
+        year_state = "readonly" if auth.has_permission("manage_academic_years") else "disabled"
+        self.academic_year_combo = ttk.Combobox(year_box, textvariable=self.academic_year_var, state=year_state, width=16)
+        self.academic_year_combo.pack(anchor="e", pady=(4, 0))
+        self.academic_year_combo.bind("<<ComboboxSelected>>", self._academic_year_changed)
+        self._load_academic_years()
         user_label = "Not signed in"
         if auth.CURRENT_SESSION is not None:
             user_label = f"Signed in as {auth.CURRENT_SESSION.username} ({auth.CURRENT_SESSION.role})"
@@ -146,31 +160,88 @@ class DashboardWindow(tk.Toplevel):
             self.backup_status_frame, textvariable=self.backup_status_var, bg=self._sfms_palette["bg"],
             fg=self._sfms_palette["fg"], justify="left", anchor="w"
         ).pack(side="left", fill="x", expand=True)
-        ttk.Button(self.backup_status_frame, text="Backup Now", command=self._open_backup_window).pack(side="right")
-        ttk.Button(button_frame, text=label("main_collection", self.language), command=self._on_main_collection_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text=label("small_collection", self.language), command=self._on_small_collection_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text=label("exemption_collection", self.language), command=self._on_exemption_collection_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text=label("advance_payment", self.language), command=self._on_advance_payment_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text=label("dues", self.language), command=self._on_dues_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text=label("discounts", self.language), command=self._on_discount_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text=label("exemptions", self.language), command=self._on_exemption_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text=label("students", self.language), command=self._on_students_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text=label("fee_heads", self.language), command=self._on_fee_heads_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text=label("fee_structure", self.language), command=self._on_fee_structure_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text=label("academic_years", self.language), command=self._on_academic_years_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text=label("reports", self.language), command=self._on_reports_click).pack(fill="x", pady=5)
-        if auth.CURRENT_SESSION is not None and auth.CURRENT_SESSION.role == "ADMIN":
-            ttk.Button(button_frame, text=label("receipt_reprint", self.language), command=self._on_receipt_reprint_click).pack(fill="x", pady=5)
-            ttk.Button(button_frame, text=label("void_payment", self.language), command=self._on_void_payment_click).pack(fill="x", pady=5)
-            ttk.Button(button_frame, text="Cheque Management", command=self._on_cheques_click).pack(fill="x", pady=5)
-            ttk.Button(button_frame, text=label("audit_log", self.language), command=self._on_audit_log_click).pack(fill="x", pady=5)
-            ttk.Button(button_frame, text=label("fee_notices", self.language), command=self._on_fee_notices_click).pack(fill="x", pady=5)
+        if is_admin:
+            ttk.Button(self.backup_status_frame, text="Backup Now", command=self._open_backup_window).pack(side="right")
+        permission_buttons = (
+            ("collect_main_fees", label("main_collection", self.language), self._on_main_collection_click),
+            ("collect_small_fees", label("small_collection", self.language), self._on_small_collection_click),
+            ("collect_exemption_fees", label("exemption_collection", self.language), self._on_exemption_collection_click),
+            ("collect_advance_payments", label("advance_payment", self.language), self._on_advance_payment_click),
+            ("view_dues", label("dues", self.language), self._on_dues_click),
+            ("manage_students", label("students", self.language), self._on_students_click),
+            ("manage_classes", "Classes and Sections", self._on_classes_click),
+            ("view_reports", label("reports", self.language), self._on_reports_click),
+            ("manage_discounts", label("discounts", self.language), self._on_discount_click),
+            ("manage_exemptions", label("exemptions", self.language), self._on_exemption_click),
+            ("manage_fee_heads", label("fee_heads", self.language), self._on_fee_heads_click),
+            ("manage_fee_structure", label("fee_structure", self.language), self._on_fee_structure_click),
+            ("manage_academic_years", label("academic_years", self.language), self._on_academic_years_click),
+            ("reprint_receipts", label("receipt_reprint", self.language), self._on_receipt_reprint_click),
+            ("void_payments", label("void_payment", self.language), self._on_void_payment_click),
+            ("manage_cheques", "Cheque Management", self._on_cheques_click),
+            ("view_audit_log", label("audit_log", self.language), self._on_audit_log_click),
+            ("issue_fee_notices", label("fee_notices", self.language), self._on_fee_notices_click),
+        )
+        for permission_key, text, command in permission_buttons:
+            if auth.has_permission(permission_key):
+                ttk.Button(button_frame, text=text, command=command).pack(fill="x", pady=5)
+        if is_admin:
             ttk.Button(button_frame, text=label("user_management", self.language), command=self._on_users_click).pack(fill="x", pady=5)
+            ttk.Button(button_frame, text="Accountant Permissions", command=self._on_permissions_click).pack(fill="x", pady=5)
             ttk.Button(button_frame, text=label("settings", self.language), command=self._on_settings_click).pack(fill="x", pady=5)
         ttk.Button(button_frame, text=label("help", self.language), command=self._on_help_click).pack(fill="x", pady=5)
         ttk.Button(button_frame, text=label("about", self.language), command=self._on_about_click).pack(fill="x", pady=5)
         ttk.Button(button_frame, text=label("change_password", self.language), command=self._on_change_password_click).pack(fill="x", pady=5)
         ttk.Button(button_frame, text=label("logout", self.language), command=self._on_logout_click).pack(fill="x", pady=5)
+
+    def _load_academic_years(self) -> None:
+        """Populate the dashboard year selector and show the current active year."""
+        with sqlite3.connect(DB_PATH) as conn:
+            rows = conn.execute("SELECT label,is_active FROM academic_years ORDER BY start_date DESC,label DESC").fetchall()
+        labels = [str(row[0]) for row in rows]
+        active = next((str(row[0]) for row in rows if row[1]), labels[0] if labels else "")
+        self.academic_year_combo.configure(values=labels)
+        self.academic_year_var.set(active)
+
+    def _academic_year_changed(self, _event=None) -> None:
+        """Allow only an administrator to switch the application-wide academic year."""
+        if not auth.has_permission("manage_academic_years"):
+            messagebox.showerror(
+                "Access denied",
+                "You do not have permission to change the active academic year.",
+                parent=self,
+            )
+            self._load_academic_years()
+            return
+        auth.touch_session()
+        label = self.academic_year_var.get().strip()
+        if not label:
+            return
+        try:
+            from ledger import ensure_student_charges
+            from ui_master_utils import audit, connect_db
+
+            with connect_db() as conn:
+                selected = conn.execute("SELECT id FROM academic_years WHERE label=?", (label,)).fetchone()
+                if selected is None:
+                    raise ValueError("The selected academic year no longer exists.")
+                old = conn.execute("SELECT id,label FROM academic_years WHERE is_active=1 LIMIT 1").fetchone()
+                conn.execute("UPDATE academic_years SET is_active=0")
+                conn.execute("UPDATE academic_years SET is_active=1 WHERE id=?", (selected["id"],))
+                ensure_student_charges(conn, label)
+                audit(conn, "ACADEMIC_YEAR_SELECT", "academic_years", selected["id"], dict(old) if old else None, {"label": label})
+        except Exception as exc:
+            messagebox.showerror("Academic Year", str(exc), parent=self)
+            self._load_academic_years()
+            return
+        self._load_notifications_async()
+
+    @auth.require_permission("manage_classes")
+    def _on_classes_click(self) -> None:
+        auth.touch_session()
+        from ui_classes import ClassSectionWindow
+
+        ClassSectionWindow(self)
 
     def _bind_shortcuts(self) -> None:
         """Bind documented dashboard keyboard shortcuts to existing safe handlers."""
@@ -319,6 +390,7 @@ class DashboardWindow(tk.Toplevel):
         self.dismissed_notifications.add(key)
         banner.destroy()
 
+    @auth.require_permission("view_dues")
     def _open_threshold_dues(self, threshold: int) -> None:
         """Open dues filtered to the selected overdue threshold."""
         auth.touch_session()
@@ -341,6 +413,7 @@ class DashboardWindow(tk.Toplevel):
 
         on_closing(self)
 
+    @auth.require_permission("collect_main_fees")
     def _on_main_collection_click(self) -> None:
         """Touch the session and open main fee collection."""
         auth.touch_session()
@@ -348,6 +421,7 @@ class DashboardWindow(tk.Toplevel):
 
         CollectionMainWindow(self)
 
+    @auth.require_permission("collect_small_fees")
     def _on_small_collection_click(self) -> None:
         """Touch the session and open small fee collection."""
         auth.touch_session()
@@ -355,6 +429,7 @@ class DashboardWindow(tk.Toplevel):
 
         CollectionSmallWindow(self)
 
+    @auth.require_permission("collect_exemption_fees")
     def _on_exemption_collection_click(self) -> None:
         """Touch the session and open exemption-aware collection."""
         auth.touch_session()
@@ -362,6 +437,7 @@ class DashboardWindow(tk.Toplevel):
 
         CollectionExemptionWindow(self)
 
+    @auth.require_permission("collect_advance_payments")
     def _on_advance_payment_click(self) -> None:
         """Touch the session and open advance payment collection."""
         auth.touch_session()
@@ -369,6 +445,7 @@ class DashboardWindow(tk.Toplevel):
 
         AdvancePaymentWindow(self)
 
+    @auth.require_permission("view_dues")
     def _on_dues_click(self) -> None:
         """Touch the session and open dues view."""
         auth.touch_session()
@@ -376,6 +453,7 @@ class DashboardWindow(tk.Toplevel):
 
         DuesWindow(self)
 
+    @auth.require_permission("manage_discounts")
     def _on_discount_click(self) -> None:
         """Touch the session and open discount recording."""
         auth.touch_session()
@@ -383,6 +461,7 @@ class DashboardWindow(tk.Toplevel):
 
         DiscountWindow(self)
 
+    @auth.require_permission("manage_exemptions")
     def _on_exemption_click(self) -> None:
         """Touch the session and open exemption recording."""
         auth.touch_session()
@@ -390,6 +469,7 @@ class DashboardWindow(tk.Toplevel):
 
         ExemptionWindow(self)
 
+    @auth.require_permission("manage_students")
     def _on_students_click(self) -> None:
         """Touch the session and open student management."""
         auth.touch_session()
@@ -397,6 +477,7 @@ class DashboardWindow(tk.Toplevel):
 
         StudentWindow(self)
 
+    @auth.require_permission("manage_fee_heads")
     def _on_fee_heads_click(self) -> None:
         """Touch the session and open fee-head management."""
         auth.touch_session()
@@ -404,6 +485,7 @@ class DashboardWindow(tk.Toplevel):
 
         FeeHeadsWindow(self)
 
+    @auth.require_permission("manage_fee_structure")
     def _on_fee_structure_click(self) -> None:
         """Touch the session and open fee-structure management."""
         auth.touch_session()
@@ -411,6 +493,7 @@ class DashboardWindow(tk.Toplevel):
 
         FeeStructureWindow(self)
 
+    @auth.require_permission("manage_academic_years")
     def _on_academic_years_click(self) -> None:
         """Touch the session and open academic-year management."""
         auth.touch_session()
@@ -418,6 +501,7 @@ class DashboardWindow(tk.Toplevel):
 
         AcademicYearWindow(self)
 
+    @auth.require_permission("view_reports")
     def _on_reports_click(self) -> None:
         """Touch the session and open the PDF report center."""
         auth.touch_session()
@@ -425,6 +509,7 @@ class DashboardWindow(tk.Toplevel):
 
         ReportsWindow(self)
 
+    @auth.require_permission("reprint_receipts")
     def _on_receipt_reprint_click(self) -> None:
         """Touch the session and open administrator receipt reprinting."""
         auth.touch_session()
@@ -432,6 +517,7 @@ class DashboardWindow(tk.Toplevel):
 
         ReprintWindow(self)
 
+    @auth.require_permission("void_payments")
     def _on_void_payment_click(self) -> None:
         """Touch the session and open administrator payment voiding."""
         auth.touch_session()
@@ -439,6 +525,7 @@ class DashboardWindow(tk.Toplevel):
 
         VoidPaymentWindow(self)
 
+    @auth.require_permission("manage_cheques")
     def _on_cheques_click(self) -> None:
         """Open the administrator cheque lifecycle screen."""
         auth.touch_session()
@@ -446,6 +533,7 @@ class DashboardWindow(tk.Toplevel):
 
         ChequeManagementWindow(self)
 
+    @auth.require_permission("view_audit_log")
     def _on_audit_log_click(self) -> None:
         """Touch the session and open the administrator audit viewer."""
         auth.touch_session()
@@ -453,6 +541,7 @@ class DashboardWindow(tk.Toplevel):
 
         AuditLogWindow(self)
 
+    @auth.require_permission("issue_fee_notices")
     def _on_fee_notices_click(self) -> None:
         """Open administrator fee-notice generation."""
         auth.touch_session()
@@ -467,6 +556,13 @@ class DashboardWindow(tk.Toplevel):
         from ui_users import UserManagementWindow
 
         UserManagementWindow(self)
+
+    @auth.require_role("ADMIN")
+    def _on_permissions_click(self) -> None:
+        """Open per-accountant permission management."""
+        from ui_permissions import AccountantPermissionsWindow
+
+        AccountantPermissionsWindow(self)
 
     def _on_settings_click(self) -> None:
         """Open administrator settings."""

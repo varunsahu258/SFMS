@@ -10,8 +10,6 @@ import auth
 from audit import log_action
 from config import DB_PATH
 
-ROLE_ADMIN = "ADMIN"
-
 
 def connect_db() -> sqlite3.Connection:
     """Open a SQLite connection with required SFMS pragmas enabled."""
@@ -27,9 +25,21 @@ def current_user_id() -> int | None:
     return auth.CURRENT_SESSION.user_id if auth.CURRENT_SESSION is not None else None
 
 
+def ensure_permission_write(permission_key: str) -> bool:
+    """Require a configured application permission before a database write."""
+    if not auth.has_permission(permission_key):
+        messagebox.showerror(
+            "Access denied",
+            "You do not have permission to perform this action.",
+        )
+        return False
+    auth.CURRENT_SESSION.touch()
+    return True
+
+
 def ensure_admin_write() -> bool:
     """Return True only when an ADMIN session is available for a write operation."""
-    if auth.CURRENT_SESSION is None or auth.CURRENT_SESSION.role != ROLE_ADMIN or not auth.current_user_can_write():
+    if not auth.can_override_financial_data():
         messagebox.showerror("Access denied", "Administrator login is required for this action.")
         return False
     auth.CURRENT_SESSION.touch()

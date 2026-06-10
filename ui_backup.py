@@ -96,7 +96,8 @@ class BackupWindow(tk.Toplevel):
         ttk.Button(frame, text="Set Master Password", command=self.set_master_password).pack(anchor="w", pady=6)
         tk.Label(
             frame,
-            text="The password wraps a random encryption key and is never stored. Losing it makes backups unrecoverable.",
+            text=("Encrypted backups include the database and receipt-integrity key for full machine recovery. "
+                  "Keep the backup password safe and upload backups off this computer; losing both makes recovery impossible."),
             bg=SPLASH_BG,
             fg=SPLASH_FG,
             wraplength=720,
@@ -217,7 +218,11 @@ class BackupWindow(tk.Toplevel):
         except ValueError as exc:
             messagebox.showerror("Backup Password", str(exc), parent=self)
             return
-        messagebox.showinfo("Backup Password", "Backup password saved; existing backups remain readable.", parent=self)
+        messagebox.showinfo(
+            "Backup Password",
+            "Backup password saved. New recovery backups use this password; keep previous passwords for older off-site backups.",
+            parent=self,
+        )
 
     def save_schedule(self) -> None:
         with _connect() as conn:

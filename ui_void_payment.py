@@ -107,7 +107,7 @@ def create_void_receipt(
 class VoidPaymentWindow(tk.Toplevel):
     """Create reversal rows without modifying immutable original payments."""
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("void_payments")
     def __init__(self, master=None):
         """Create the receipt search and payment-void interface."""
         super().__init__(master)
@@ -227,7 +227,7 @@ class VoidPaymentWindow(tk.Toplevel):
                 ),
             )
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("void_payments")
     def confirm_void(self) -> None:
         """Append reversing payments, a void receipt, its hash, and an audit record."""
         auth.touch_session()

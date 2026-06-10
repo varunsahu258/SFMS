@@ -6,9 +6,9 @@ import sqlite3
 from collections.abc import Callable
 
 from config import (
-    BACKUP_INTERVAL_DEFAULT, LOGO_PATH, SCHOOL_ADDRESS, SCHOOL_NAME,
+    BACKUP_INTERVAL_DEFAULT, LOGO_PATH, RECEIPT_ISSUER_NAME, SCHOOL_ADDRESS, SCHOOL_NAME,
     SESSION_TIMEOUT_DEFAULT, SETTING_BACKUP_INTERVAL_HOURS, SETTING_LOGO_PATH,
-    SETTING_SCHOOL_ADDRESS, SETTING_SCHOOL_NAME, SETTING_SESSION_TIMEOUT_MINUTES,
+    SETTING_RECEIPT_ISSUER_NAME, SETTING_SCHOOL_ADDRESS, SETTING_SCHOOL_NAME, SETTING_SESSION_TIMEOUT_MINUTES,
 )
 from utils import now_str
 
@@ -239,6 +239,82 @@ def migration_v008_receipt_sequence(conn: sqlite3.Connection) -> None:
     ensure_receipt_sequence(conn)
 
 
+def migration_v009_class_section_and_student_details(conn: sqlite3.Connection) -> None:
+    """Add class/section masters and the complete student admission profile."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS classes(
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS sections(
+            id INTEGER PRIMARY KEY,
+            class_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT,
+            UNIQUE(class_id,name),
+            FOREIGN KEY(class_id) REFERENCES classes(id)
+        );
+        """
+    )
+    student_columns = {row[1] for row in conn.execute("PRAGMA table_info(students)")}
+    additions = {
+        "scholar_no": "TEXT",
+        "ekyc_status": "TEXT DEFAULT 'PENDING'",
+        "serial_no": "TEXT",
+        "father_name": "TEXT",
+        "mother_name": "TEXT",
+        "address": "TEXT",
+        "dob": "TEXT",
+        "admission_date": "TEXT",
+        "mobile2": "TEXT",
+        "sssm_id": "TEXT",
+        "gender": "TEXT",
+        "category": "TEXT",
+    }
+    for name, definition in additions.items():
+        if name not in student_columns:
+            conn.execute(f"ALTER TABLE students ADD COLUMN {name} {definition}")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_students_scholar_no ON students(scholar_no) WHERE scholar_no IS NOT NULL AND scholar_no<>''")
+    conn.execute("UPDATE students SET father_name=guardian_name WHERE COALESCE(father_name,'')='' AND COALESCE(guardian_name,'')<>''")
+    conn.execute(
+        "INSERT OR IGNORE INTO classes(name,created_at) "
+        "SELECT DISTINCT class,? FROM students WHERE class IS NOT NULL AND TRIM(class)<>''",
+        (now_str(),),
+    )
+    conn.execute(
+        """INSERT OR IGNORE INTO sections(class_id,name,created_at)
+           SELECT c.id,s.section,? FROM students s JOIN classes c ON c.name=s.class
+           WHERE s.section IS NOT NULL AND TRIM(s.section)<>''""",
+        (now_str(),),
+    )
+
+
+def migration_v010_accountant_permissions(conn: sqlite3.Connection) -> None:
+    """Create per-accountant permission overrides managed by administrators."""
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS user_permissions(
+               user_id INTEGER NOT NULL,
+               permission_key TEXT NOT NULL,
+               allowed INTEGER NOT NULL CHECK(allowed IN (0,1)),
+               updated_at TEXT NOT NULL,
+               updated_by INTEGER,
+               PRIMARY KEY(user_id, permission_key),
+               FOREIGN KEY(user_id) REFERENCES users(id),
+               FOREIGN KEY(updated_by) REFERENCES users(id)
+           )"""
+    )
+
+
+def migration_v011_receipt_issuer_setting(conn: sqlite3.Connection) -> None:
+    """Add the configurable name printed beneath the receipt signature line."""
+    _setting(conn, SETTING_RECEIPT_ISSUER_NAME, RECEIPT_ISSUER_NAME)
+
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     ("v001_base_settings", migration_v001_base_settings),
     ("v002_setup_defaults", migration_v002_setup_defaults),
@@ -248,6 +324,9 @@ MIGRATIONS: tuple[Migration, ...] = (
     ("v006_advance_and_backup_keys", migration_v006_advance_and_backup_keys),
     ("v007_remove_oauth_token_setting", migration_v007_remove_oauth_token_setting),
     ("v008_receipt_sequence", migration_v008_receipt_sequence),
+    ("v009_class_section_and_student_details", migration_v009_class_section_and_student_details),
+    ("v010_accountant_permissions", migration_v010_accountant_permissions),
+    ("v011_receipt_issuer_setting", migration_v011_receipt_issuer_setting),
 )
 
 

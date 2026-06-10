@@ -7,7 +7,7 @@ from tkinter import messagebox, ttk
 
 import auth
 from config import SPLASH_BG, SPLASH_FG
-from ui_master_utils import audit, connect_db, ensure_admin_write
+from ui_master_utils import audit, connect_db, ensure_permission_write
 
 REGISTER_TYPES = ("BIG", "SMALL", "BOTH")
 
@@ -15,7 +15,7 @@ REGISTER_TYPES = ("BIG", "SMALL", "BOTH")
 class FeeHeadsWindow(tk.Toplevel):
     """Admin-only fee-head management window."""
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("manage_fee_heads")
     def __init__(self, master=None):
         """Create the fee-head window."""
         super().__init__(master)
@@ -59,10 +59,10 @@ class FeeHeadsWindow(tk.Toplevel):
             status = "Active" if row["is_active"] else "Inactive"
             self.tree.insert("", "end", iid=str(row["id"]), values=(row["id"], row["name"], row["register_type"], status))
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("manage_fee_heads")
     def add_fee_head(self) -> None:
         """Insert a new fee head and audit it."""
-        if not ensure_admin_write():
+        if not ensure_permission_write("manage_fee_heads"):
             return
         name = self.name_var.get().strip()
         register_type = self.register_type_var.get()
@@ -83,11 +83,11 @@ class FeeHeadsWindow(tk.Toplevel):
             return None
         return int(selected[0])
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("manage_fee_heads")
     def deactivate_selected(self) -> None:
         """Deactivate a fee head if no payments reference it."""
         fee_head_id = self._selected_id()
-        if fee_head_id is None or not ensure_admin_write():
+        if fee_head_id is None or not ensure_permission_write("manage_fee_heads"):
             return
         with connect_db() as conn:
             count = conn.execute("SELECT COUNT(*) FROM payments WHERE fee_head_id = ?", (fee_head_id,)).fetchone()[0]
