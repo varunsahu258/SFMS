@@ -47,6 +47,7 @@ def _open_pdf(path: str) -> None:
 class ReportsWindow(tk.Toplevel):
     """Display all SFMS PDF reports in a tabbed window."""
 
+    @auth.require_permission("view_reports")
     def __init__(self, master=None):
         """Create report tabs and load dropdown values."""
         super().__init__(master)
@@ -82,7 +83,7 @@ class ReportsWindow(tk.Toplevel):
         self._build_comparative_tab(self._tab(notebook, "Comparative"))
         self._build_discount_tab(self._tab(notebook, "Discounts"))
         self._build_void_tab(self._tab(notebook, "Voids"))
-        if auth.CURRENT_SESSION is not None and auth.CURRENT_SESSION.role == "ADMIN":
+        if auth.has_permission("view_audit_log"):
             self._build_audit_tab(self._tab(notebook, "Audit"))
 
     def _tab(self, notebook: ttk.Notebook, title: str) -> tk.Frame:
