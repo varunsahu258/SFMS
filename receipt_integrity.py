@@ -16,6 +16,19 @@ from utils import now_str
 
 ENV_KEY = "SFMS_INTEGRITY_KEY"
 ALGORITHM = "HMAC-SHA256"
+KEY_ID_SETTING = "integrity_key_id"
+
+
+class IntegrityKeyError(RuntimeError):
+    """Raised when the configured key cannot safely verify the live database."""
+
+
+KEY_RECOVERY_MESSAGE = (
+    "The SFMS integrity key is missing or does not match this database. "
+    "Do not create a new key: existing receipt signatures would become unverifiable. "
+    "Restore the original integrity.key file to the SFMS configuration folder, or set "
+    "SFMS_INTEGRITY_KEY to the original key before starting SFMS."
+)
 SIGNED_PAYMENT_FIELDS = (
     "receipt_no", "student_id", "amount_paid", "payment_date", "fee_head_id",
     "amount_due", "balance", "payment_mode", "cheque_or_upi_ref", "collected_by",
@@ -44,9 +57,90 @@ def _decode_integrity_key(value: str, source: str) -> bytes:
     try:
         key = base64.b64decode(value.encode("ascii"), altchars=b"-_", validate=True)
     except (UnicodeEncodeError, ValueError) as exc:
-        raise RuntimeError(f"{source} must contain a base64-encoded 32-byte key.") from exc
+        raise IntegrityKeyError(f"{source} must contain a base64-encoded 32-byte key.") from exc
     if len(key) < 32:
-        raise RuntimeError(f"{source} must decode to at least 32 bytes.")
+        raise IntegrityKeyError(f"{source} must decode to at least 32 bytes.")
+    return key
+
+
+def _read_integrity_key_file(path: Path) -> str | None:
+    path = path.expanduser().resolve()
+    if not path.exists():
+        return None
+    try:
+        return path.read_text(encoding="ascii").strip()
+    except OSError as exc:
+        raise IntegrityKeyError(f"Unable to read the SFMS integrity key file: {path}") from exc
+
+
+def _create_integrity_key_file(path: Path) -> str:
+    """Create the first-install key atomically without replacing an existing key."""
+    path = path.expanduser().resolve()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        encoded = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii")
+        with path.open("x", encoding="ascii") as handle:
+            handle.write(encoded + "\n")
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+        return encoded
+    except FileExistsError:
+        value = _read_integrity_key_file(path)
+        if value is None:
+            raise IntegrityKeyError(f"Unable to read the SFMS integrity key file: {path}")
+        return value
+    except OSError as exc:
+        raise IntegrityKeyError(f"Unable to create the SFMS integrity key file: {path}") from exc
+
+
+def _key_id(key: bytes) -> str:
+    return hashlib.sha256(b"SFMS-INTEGRITY-KEY-ID\0" + key).hexdigest()
+
+
+def _database_key_id(conn: sqlite3.Connection) -> str:
+    row = conn.execute("SELECT value FROM settings WHERE key=?", (KEY_ID_SETTING,)).fetchone()
+    return str(row[0] or "") if row else ""
+
+
+def _database_has_integrity_state(conn: sqlite3.Connection) -> bool:
+    if conn.execute("SELECT 1 FROM settings WHERE key='machine_id' AND value<>''").fetchone():
+        return True
+    table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='receipt_hashes'"
+    ).fetchone()
+    return bool(table and conn.execute("SELECT 1 FROM receipt_hashes LIMIT 1").fetchone())
+
+
+def _validate_database_key(conn: sqlite3.Connection, key: bytes, *, bind: bool) -> None:
+    expected = _database_key_id(conn)
+    actual = _key_id(key)
+    if expected and not hmac.compare_digest(expected, actual):
+        raise IntegrityKeyError(KEY_RECOVERY_MESSAGE)
+    if bind and not expected:
+        conn.execute(
+            "INSERT INTO settings(key,value) VALUES(?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (KEY_ID_SETTING, actual),
+        )
+
+
+def integrity_key(conn: sqlite3.Connection | None = None, *, bind: bool = True) -> bytes:
+    """Load and validate the deployment key, refusing silent key replacement."""
+    value = os.environ.get(ENV_KEY, "").strip()
+    if value:
+        key = _decode_integrity_key(value, ENV_KEY)
+    else:
+        path = Path(INTEGRITY_KEY_PATH)
+        value = _read_integrity_key_file(path)
+        if value is None:
+            if conn is not None and (_database_key_id(conn) or _database_has_integrity_state(conn)):
+                raise IntegrityKeyError(KEY_RECOVERY_MESSAGE)
+            value = _create_integrity_key_file(path)
+        key = _decode_integrity_key(value, str(path))
+    if conn is not None:
+        _validate_database_key(conn, key, bind=bind)
     return key
 
 
@@ -192,7 +286,7 @@ def compute_receipt_hmac(fields: dict, key: bytes | None = None) -> str:
 def sign_receipt(conn: sqlite3.Connection, receipt_id: int) -> str:
     """Insert one immutable HMAC record for a newly completed receipt."""
     fields = signed_receipt_fields(conn, receipt_id)
-    value = compute_receipt_hmac(fields)
+    value = compute_receipt_hmac(fields, integrity_key(conn))
     conn.execute(
         """INSERT INTO receipt_hashes(
                receipt_id,receipt_no,hmac_value,signed_fields_json,signed_at,algorithm
