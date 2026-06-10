@@ -54,6 +54,10 @@ def main_collection_summary(conn, student_id: int) -> dict:
 class CollectionMainWindow(CollectionBaseWindow):
     """Collect one amount and record it under Tuition Fee while reducing overall dues."""
 
+    @auth.require_permission("collect_main_fees")
+    def __init__(self, master=None):
+        super().__init__(master)
+
     register_types = ("BIG", "BOTH")
     receipt_type = "BIG"
 
