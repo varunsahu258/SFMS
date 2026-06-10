@@ -107,6 +107,11 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             payment_mode TEXT,
             note TEXT,
             hash TEXT,
+            cheque_number TEXT,
+            upi_reference TEXT,
+            cheque_status TEXT CHECK(cheque_status IN ('PENDING','CLEARED','BOUNCED','CANCELLED') OR cheque_status IS NULL),
+            cheque_cleared_date TEXT,
+            cheque_bank_reference TEXT,
             FOREIGN KEY (student_id) REFERENCES students(id),
             FOREIGN KEY (fee_head_id) REFERENCES fee_heads(id),
             FOREIGN KEY (collected_by) REFERENCES users(id)
@@ -325,6 +330,12 @@ def _seed_first_run(conn: sqlite3.Connection) -> None:
         (SETTING_LOGO_PATH, LOGO_PATH),
         (SETTING_SESSION_TIMEOUT_MINUTES, str(SESSION_TIMEOUT_DEFAULT)),
         (SETTING_BACKUP_INTERVAL_HOURS, str(BACKUP_INTERVAL_DEFAULT)),
+        ("setup_complete", "0"),
+        ("ui_theme", "light"),
+        ("ui_language", "en"),
+        ("backup_encryption_enabled", "0"),
+        ("master_backup_password_hash", ""),
+        ("gdrive_token_json", ""),
     )
     conn.executemany("INSERT INTO settings (key, value) VALUES (?, ?)", settings)
 
@@ -339,9 +350,15 @@ def _seed_first_run(conn: sqlite3.Connection) -> None:
 
 
 def init_db() -> None:
-    """Initialize the SQLite database, triggers, and first-run records."""
+    """Initialize the SQLite database, triggers, seed data, and charge ledger."""
+    from ledger import migrate_legacy_ledger
+    from payment_controls import migrate_payment_controls
+
     with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
         _apply_pragmas(conn)
         _create_tables(conn)
         _create_triggers(conn)
         _seed_first_run(conn)
+        migrate_payment_controls(conn)
+        migrate_legacy_ledger(conn)
