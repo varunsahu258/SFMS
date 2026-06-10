@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import importlib.util
 import sys
 import json
 import os
@@ -15,38 +16,39 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import types
 
-if "bcrypt" not in sys.modules:
-    sys.modules["bcrypt"] = types.SimpleNamespace(checkpw=lambda *_args, **_kwargs: False)
 if "cryptography.exceptions" not in sys.modules:
-    crypto = types.ModuleType("cryptography")
-    exceptions = types.ModuleType("cryptography.exceptions")
-    class InvalidTag(Exception):
-        pass
-    exceptions.InvalidTag = InvalidTag
-    sys.modules.setdefault("cryptography", crypto)
-    sys.modules["cryptography.exceptions"] = exceptions
-    primitives = types.ModuleType("cryptography.hazmat.primitives")
-    hashes = types.ModuleType("cryptography.hazmat.primitives.hashes")
-    class SHA256: pass
-    hashes.SHA256 = SHA256
-    ciphers_aead = types.ModuleType("cryptography.hazmat.primitives.ciphers.aead")
-    class AESGCM:
-        def __init__(self, *_args): pass
-        def encrypt(self, *_args): return b""
-        def decrypt(self, *_args): return b""
-    ciphers_aead.AESGCM = AESGCM
-    kdf_pbkdf2 = types.ModuleType("cryptography.hazmat.primitives.kdf.pbkdf2")
-    class PBKDF2HMAC:
-        def __init__(self, *_args, **_kwargs): pass
-        def derive(self, *_args): return b"0" * 32
-    kdf_pbkdf2.PBKDF2HMAC = PBKDF2HMAC
-    sys.modules["cryptography.hazmat"] = types.ModuleType("cryptography.hazmat")
-    sys.modules["cryptography.hazmat.primitives"] = primitives
-    sys.modules["cryptography.hazmat.primitives.hashes"] = hashes
-    sys.modules["cryptography.hazmat.primitives.ciphers"] = types.ModuleType("cryptography.hazmat.primitives.ciphers")
-    sys.modules["cryptography.hazmat.primitives.ciphers.aead"] = ciphers_aead
-    sys.modules["cryptography.hazmat.primitives.kdf"] = types.ModuleType("cryptography.hazmat.primitives.kdf")
-    sys.modules["cryptography.hazmat.primitives.kdf.pbkdf2"] = kdf_pbkdf2
+    if sys.modules.get("cryptography") is None and importlib.util.find_spec("cryptography") is not None:
+        import cryptography.exceptions  # noqa: F401
+    else:
+        crypto = types.ModuleType("cryptography")
+        exceptions = types.ModuleType("cryptography.exceptions")
+        class InvalidTag(Exception):
+            pass
+        exceptions.InvalidTag = InvalidTag
+        sys.modules.setdefault("cryptography", crypto)
+        sys.modules["cryptography.exceptions"] = exceptions
+        primitives = types.ModuleType("cryptography.hazmat.primitives")
+        hashes = types.ModuleType("cryptography.hazmat.primitives.hashes")
+        class SHA256: pass
+        hashes.SHA256 = SHA256
+        ciphers_aead = types.ModuleType("cryptography.hazmat.primitives.ciphers.aead")
+        class AESGCM:
+            def __init__(self, *_args): pass
+            def encrypt(self, *_args): return b""
+            def decrypt(self, *_args): return b""
+        ciphers_aead.AESGCM = AESGCM
+        kdf_pbkdf2 = types.ModuleType("cryptography.hazmat.primitives.kdf.pbkdf2")
+        class PBKDF2HMAC:
+            def __init__(self, *_args, **_kwargs): pass
+            def derive(self, *_args): return b"0" * 32
+        kdf_pbkdf2.PBKDF2HMAC = PBKDF2HMAC
+        sys.modules["cryptography.hazmat"] = types.ModuleType("cryptography.hazmat")
+        sys.modules["cryptography.hazmat.primitives"] = primitives
+        sys.modules["cryptography.hazmat.primitives.hashes"] = hashes
+        sys.modules["cryptography.hazmat.primitives.ciphers"] = types.ModuleType("cryptography.hazmat.primitives.ciphers")
+        sys.modules["cryptography.hazmat.primitives.ciphers.aead"] = ciphers_aead
+        sys.modules["cryptography.hazmat.primitives.kdf"] = types.ModuleType("cryptography.hazmat.primitives.kdf")
+        sys.modules["cryptography.hazmat.primitives.kdf.pbkdf2"] = kdf_pbkdf2
 
 import pytest
 
@@ -194,6 +196,9 @@ def test_reprint_flow_writes_exactly_one_receipt_reprint_audit(tmp_path, monkeyp
         CREATE TABLE receipts(id INTEGER PRIMARY KEY, receipt_no TEXT UNIQUE, student_id INTEGER,total_paid REAL,receipt_type TEXT,printed_at TEXT,printed_by INTEGER,reprint_count INTEGER DEFAULT 0,last_reprint_at TEXT,last_reprint_by INTEGER);
         CREATE TABLE payments(id INTEGER PRIMARY KEY, receipt_no TEXT, student_id INTEGER, amount_paid REAL, payment_date TEXT, fee_head_id INTEGER, amount_due REAL, balance REAL, payment_mode TEXT, cheque_number TEXT, upi_reference TEXT, collected_by INTEGER, payment_intent TEXT, allocated_academic_year_id INTEGER, allocated_term TEXT, note TEXT);
         CREATE TABLE fee_heads(id INTEGER PRIMARY KEY, name TEXT);
+        CREATE TABLE payment_allocations(id INTEGER PRIMARY KEY,payment_id INTEGER,charge_id INTEGER);
+        CREATE TABLE charge_ledger(charge_id INTEGER PRIMARY KEY,original_amount REAL,balance REAL);
+        CREATE TABLE cheque_tracker(id INTEGER PRIMARY KEY,payment_id INTEGER,cheque_no TEXT,bank TEXT);
         CREATE TABLE receipt_print_history(id INTEGER PRIMARY KEY,receipt_id INTEGER,print_type TEXT,filename TEXT UNIQUE,file_sha256 TEXT,printed_at TEXT,printed_by INTEGER);
         CREATE TABLE audit_log(id INTEGER PRIMARY KEY,timestamp TEXT,user_id INTEGER,action TEXT,table_name TEXT,record_id TEXT,old_value TEXT,new_value TEXT,tamper_attempt INTEGER);
         """

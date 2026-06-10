@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import struct
 from pathlib import Path
 
@@ -26,11 +27,11 @@ def generate_icon(path: Path = ICON_PATH) -> Path:
     if path.exists():
         return path
     path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        from PIL import Image, ImageDraw, ImageFont
-    except ImportError:
+    if importlib.util.find_spec("PIL") is None:
         _fallback_ico(path)
         return path
+    from PIL import Image, ImageDraw, ImageFont
+
     image = Image.new("RGBA", (256, 256), "#1a1a5e")
     draw = ImageDraw.Draw(image)
     try:
