@@ -102,3 +102,34 @@ def test_original_and_two_reprints_are_distinct_and_never_overwritten(tmp_path, 
         pass
     else:
         raise AssertionError("duplicate original should have been rejected")
+
+
+def test_main_collection_receipt_data_keeps_one_payment_and_all_fee_heads(tmp_path):
+    conn = financial_db(tmp_path / "main_receipt.db")
+    conn.execute("INSERT INTO fee_heads VALUES(2,'Annual Fee')")
+    conn.execute("INSERT INTO student_charges VALUES(1,100)")
+    conn.execute("INSERT INTO student_charges VALUES(2,200)")
+    conn.execute("INSERT INTO payments(id,student_id,receipt_no,fee_head_id,amount_due,amount_paid,balance,payment_date,collected_by,payment_mode,note,hash) VALUES(1,1,'MAIN-1',1,300,120,180,'01-06-2026',1,'CASH','MAIN COLLECTION','')")
+    conn.execute("INSERT INTO payment_allocations VALUES(1,1,1)")
+    conn.execute("INSERT INTO payment_allocations VALUES(2,1,2)")
+    conn.execute("INSERT INTO receipts VALUES(1,'MAIN-1',1,120,'BIG','01-06-2026',1,0,NULL,NULL)")
+
+    data = receipt_printer._receipt_data(conn, "MAIN-1")
+
+    assert len(data["payments"]) == 1
+    assert data["payments"][0]["amount_due"] == 300
+    assert data["payments"][0]["balance"] == 180
+    assert data["all_fee_heads"] == ["Tuition", "Annual Fee"]
+
+    output = tmp_path / "main_receipts"
+    original_dir = receipt_printer.RECEIPTS_DIR
+    original_open = receipt_printer._open_pdf
+    receipt_printer.RECEIPTS_DIR = str(output)
+    receipt_printer._open_pdf = lambda _path: None
+    try:
+        path = Path(receipt_printer.print_receipt(conn, "MAIN-1"))
+    finally:
+        receipt_printer.RECEIPTS_DIR = original_dir
+        receipt_printer._open_pdf = original_open
+    assert path.exists()
+    assert path.stat().st_size > 0

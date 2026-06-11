@@ -31,3 +31,50 @@ def test_existing_accountant_does_not_open_setup_wizard():
         "v001_base_settings", "v002_setup_defaults", "v003_receipt_hmac",
         "v004_receipt_print_tracking"
     ]
+
+
+def test_accountant_permission_migration_is_idempotent():
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE users(id INTEGER PRIMARY KEY)")
+    from migrations import migration_v010_accountant_permissions
+
+    migration_v010_accountant_permissions(conn)
+    migration_v010_accountant_permissions(conn)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(user_permissions)")}
+    assert {"user_id", "permission_key", "allowed", "updated_at", "updated_by"} <= columns
+
+
+def test_receipt_issuer_setting_migration_adds_default():
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT)")
+    from migrations import migration_v011_receipt_issuer_setting
+
+    migration_v011_receipt_issuer_setting(conn)
+    assert conn.execute(
+        "SELECT value FROM settings WHERE key='receipt_issuer_name'"
+    ).fetchone()[0] == "Sonali Sahu"
+
+
+def test_admission_migration_preserves_referenced_fee_structure_rows():
+    from migrations import migration_v014_admissions
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.executescript("""
+        CREATE TABLE users(id INTEGER PRIMARY KEY);
+        CREATE TABLE students(id INTEGER PRIMARY KEY);
+        CREATE TABLE fee_heads(id INTEGER PRIMARY KEY,name TEXT);
+        CREATE TABLE fee_structure(id INTEGER PRIMARY KEY,fee_head_id INTEGER,
+          FOREIGN KEY(fee_head_id) REFERENCES fee_heads(id));
+        CREATE TABLE student_charges(id INTEGER PRIMARY KEY,fee_structure_id INTEGER,
+          FOREIGN KEY(fee_structure_id) REFERENCES fee_structure(id));
+        INSERT INTO fee_heads VALUES(1,'Admission Fee');
+        INSERT INTO fee_structure VALUES(1,1);
+        INSERT INTO student_charges VALUES(1,1);
+    """)
+    migration_v014_admissions(conn)
+    migration_v014_admissions(conn)
+    assert conn.execute("SELECT is_one_time FROM fee_heads WHERE id=1").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM fee_structure").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM student_charges").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM admissions").fetchone()[0] == 0

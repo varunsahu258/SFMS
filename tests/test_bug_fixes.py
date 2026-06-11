@@ -296,3 +296,67 @@ def test_restore_validation_rejects_corrupt_sqlite_file(tmp_path):
     ok, reasons = validate_backup_for_restore(str(db))
     assert not ok
     assert reasons
+
+
+def test_application_close_logs_out_quits_and_destroys_all_windows(monkeypatch):
+    import auth
+    import main
+
+    calls = []
+
+    class Window:
+        def __init__(self, name):
+            self.name = name
+        def quit(self):
+            calls.append((self.name, "quit"))
+        def winfo_exists(self):
+            return True
+        def destroy(self):
+            calls.append((self.name, "destroy"))
+
+    target = Window("target")
+    root = Window("root")
+    monkeypatch.setattr(main.tk, "_default_root", root)
+    monkeypatch.setattr(auth, "logout", lambda: calls.append(("auth", "logout")))
+
+    main._exit_application(target)
+
+    assert calls[0] == ("auth", "logout")
+    assert ("target", "quit") in calls
+    assert ("root", "quit") in calls
+    assert ("target", "destroy") in calls
+    assert ("root", "destroy") in calls
+
+
+def test_close_handler_finishes_synchronously_without_tk_worker_callback(tmp_path, monkeypatch):
+    import main
+    import notifications
+
+    class Window:
+        _sfms_close_pending = False
+
+    target = Window()
+    exits = []
+    monkeypatch.setattr(main, "DB_PATH", str(tmp_path / "close.db"))
+    monkeypatch.setattr(notifications, "backup_overdue", lambda _conn: False)
+    monkeypatch.setattr(notifications, "backup_interval_hours", lambda _conn: 24)
+    monkeypatch.setattr(main, "_exit_application", lambda window: exits.append(window))
+
+    main.on_closing(target)
+
+    assert exits == [target]
+    assert target._sfms_close_pending is True
+
+
+def test_logout_clears_session_even_when_audit_database_fails(monkeypatch):
+    import auth
+
+    auth.CURRENT_SESSION = auth.Session(
+        token="t", user_id=1, username="admin", role="ADMIN",
+        login_time=datetime.now(), last_active=datetime.now(),
+    )
+    monkeypatch.setattr(auth, "_connect", lambda: (_ for _ in ()).throw(sqlite3.OperationalError("disk unavailable")))
+
+    auth.logout()
+
+    assert auth.CURRENT_SESSION is None

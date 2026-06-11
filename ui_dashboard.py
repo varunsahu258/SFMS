@@ -6,13 +6,13 @@ import sqlite3
 import threading
 from datetime import datetime
 import tkinter as tk
-from tkinter import ttk
+from tkinter import messagebox, ttk
 
 import auth
 from config import APP_TITLE, DB_PATH, SCHOOL_NAME
 from ui_change_password import ChangePasswordWindow
 
-WINDOW_SIZE = "700x900"
+WINDOW_SIZE = "1280x820"
 
 
 def _parse_date(value: str | None) -> datetime | None:
@@ -97,80 +97,322 @@ class DashboardWindow(tk.Toplevel):
     def _center_window(self) -> None:
         """Center the dashboard window on screen."""
         self.update_idletasks()
-        width = int(WINDOW_SIZE.split("x")[0])
-        height = int(WINDOW_SIZE.split("x")[1])
-        x_position = (self.winfo_screenwidth() - width) // 2
-        y_position = (self.winfo_screenheight() - height) // 2
-        self.geometry(f"{WINDOW_SIZE}+{x_position}+{y_position}")
+        requested_width = int(WINDOW_SIZE.split("x")[0])
+        requested_height = int(WINDOW_SIZE.split("x")[1])
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+        width = min(requested_width, max(screen_width - 48, 900))
+        height = min(requested_height, max(screen_height - 72, 620))
+        x_position = max((screen_width - width) // 2, 0)
+        y_position = max((screen_height - height) // 2, 0)
+        self.minsize(900, 620)
+        self.geometry(f"{width}x{height}+{x_position}+{y_position}")
 
     def _build_widgets(self) -> None:
-        """Build the fixed notification area, dashboard labels, and buttons."""
-        from ui_strings import label
+        """Build a persistent modern sidebar, header, and single-page workspace."""
+        self._nav_buttons: dict[str, tk.Button] = {}
+        self._active_page = None
+        self._active_nav_key = "dashboard"
+        palette = {
+            "sidebar": "#563bb7", "sidebar_hover": "#6d52cc", "sidebar_active": "#ffffff",
+            "page": "#f5f3fa", "card": "#ffffff", "text": "#201a2b", "muted": "#766f80",
+            "accent": "#5b3fc0", "border": "#e9e4f2", "success": "#e4f7ea",
+        }
+        self._workspace_palette = palette
+        self.configure(bg=palette["page"])
 
-        self.notification_frame = tk.Frame(self, bg=self._sfms_palette["bg"], height=82)
-        self.notification_frame.pack(fill="x", padx=12, pady=(10, 0))
-        self.notification_frame.pack_propagate(False)
-        tk.Label(self, text=_configured_school_name(), bg=self._sfms_palette["bg"], fg=self._sfms_palette["fg"], font=("Segoe UI", 18, "bold")).pack(pady=(12, 8))
-        tk.Label(self, text=f"{APP_TITLE} Dashboard", bg=self._sfms_palette["bg"], fg=self._sfms_palette["fg"], font=("Segoe UI", 26, "bold")).pack(pady=(0, 20))
-        user_label = "Not signed in"
-        if auth.CURRENT_SESSION is not None:
-            user_label = f"Signed in as {auth.CURRENT_SESSION.username} ({auth.CURRENT_SESSION.role})"
-        tk.Label(self, text=user_label, bg=self._sfms_palette["bg"], fg=self._sfms_palette["fg"], font=("Segoe UI", 12)).pack(pady=(0, 20))
-        content_frame = tk.Frame(self, bg=self._sfms_palette["bg"])
-        content_frame.pack(fill="both", expand=True, padx=18, pady=8)
-        button_column = tk.Frame(content_frame, bg=self._sfms_palette["bg"])
-        button_column.pack(side="left", fill="y", padx=(20, 12))
-        button_canvas = tk.Canvas(button_column, width=230, bg=self._sfms_palette["bg"], highlightthickness=0)
-        button_scroll = ttk.Scrollbar(button_column, orient="vertical", command=button_canvas.yview)
-        button_canvas.configure(yscrollcommand=button_scroll.set)
-        button_scroll.pack(side="right", fill="y")
-        button_canvas.pack(side="left", fill="y", expand=True)
-        button_frame = tk.Frame(button_canvas, bg=self._sfms_palette["bg"])
-        button_window = button_canvas.create_window((0, 0), window=button_frame, anchor="nw", width=220)
-        button_frame.bind("<Configure>", lambda _event: button_canvas.configure(scrollregion=button_canvas.bbox("all")))
-        button_canvas.bind("<Configure>", lambda event: button_canvas.itemconfigure(button_window, width=max(event.width - 4, 180)))
-        chart_frame = tk.Frame(content_frame, bg=self._sfms_palette["bg"])
-        chart_frame.pack(side="right", fill="both", expand=True, padx=(10, 16), pady=8)
-        self.cashflow_canvas = tk.Canvas(
-            chart_frame, width=300, height=180, bg="white",
-            highlightthickness=1, highlightbackground="#777777",
+        shell = tk.Frame(self, bg=palette["page"])
+        shell.pack(fill="both", expand=True)
+        sidebar = tk.Frame(shell, bg=palette["sidebar"], width=238)
+        sidebar.pack(side="left", fill="y")
+        sidebar.pack_propagate(False)
+        main = tk.Frame(shell, bg=palette["page"])
+        main.pack(side="left", fill="both", expand=True)
+
+        brand = tk.Frame(sidebar, bg=palette["sidebar"])
+        brand.pack(fill="x", padx=20, pady=(24, 20))
+        tk.Label(brand, text="S", bg="white", fg=palette["accent"], width=3, height=1,
+                 font=("Segoe UI", 17, "bold")).pack(side="left")
+        tk.Label(brand, text="  SFMS", bg=palette["sidebar"], fg="white",
+                 font=("Segoe UI", 16, "bold")).pack(side="left")
+
+        nav_canvas = tk.Canvas(sidebar, bg=palette["sidebar"], highlightthickness=0)
+        nav_scroll = ttk.Scrollbar(sidebar, orient="vertical", command=nav_canvas.yview)
+        nav_canvas.configure(yscrollcommand=nav_scroll.set)
+        nav_scroll.pack(side="right", fill="y")
+        nav_canvas.pack(side="left", fill="both", expand=True)
+        nav = tk.Frame(nav_canvas, bg=palette["sidebar"])
+        nav_window = nav_canvas.create_window((0, 0), window=nav, anchor="nw", width=220)
+        nav.bind("<Configure>", lambda _event: nav_canvas.configure(scrollregion=nav_canvas.bbox("all")))
+        nav_canvas.bind("<Configure>", lambda event: nav_canvas.itemconfigure(nav_window, width=event.width))
+
+        def section(text: str) -> None:
+            tk.Label(nav, text=text.upper(), bg=palette["sidebar"], fg="#c9bff0",
+                     font=("Segoe UI", 8, "bold"), anchor="w").pack(fill="x", padx=22, pady=(16, 5))
+
+        def nav_item(key: str, text: str, command, symbol: str = "•") -> None:
+            button = tk.Button(
+                nav, text=f" {symbol}   {text}", command=command, anchor="w", relief="flat", bd=0,
+                bg=palette["sidebar"], fg="white", activebackground=palette["sidebar_hover"],
+                activeforeground="white", font=("Segoe UI", 10), padx=16, pady=9, cursor="hand2",
+            )
+            button.pack(fill="x", padx=10, pady=2)
+            self._nav_buttons[key] = button
+
+        nav_item("dashboard", "Dashboard", self._show_dashboard, "▦")
+        section("Fee Collection")
+        for key, permission, text, command, symbol in (
+            ("main_collection", "collect_main_fees", "Main Collection", self._on_main_collection_click, "₹"),
+            ("small_collection", "collect_small_fees", "Small Collection", self._on_small_collection_click, "₹"),
+            ("advance", "collect_advance_payments", "Advance Payment", self._on_advance_payment_click, "+"),
+            ("dues", "view_dues", "Student Dues", self._on_dues_click, "◷"),
+            ("dues_register", "view_dues", "Dues Register", self._on_dues_register_click, "▤"),
+            ("cheques", "manage_cheques", "Cheque Management", self._on_cheques_click, "▤"),
+        ):
+            if auth.has_permission(permission):
+                nav_item(key, text, command, symbol)
+        section("School Records")
+        for key, permission, text, command, symbol in (
+            ("admissions", "manage_admissions", "New Admissions", self._on_admissions_click, "+"),
+            ("students", "manage_students", "Students", self._on_students_click, "♟"),
+            ("student_view", "view_student_details", "View Student Details", self._on_student_view_click, "◉"),
+            ("receipt_history", "view_receipts", "Receipt History", self._on_receipt_history_click, "⌕"),
+            ("classes", "manage_classes", "Classes & Sections", self._on_classes_click, "▥"),
+            ("reports", "view_reports", "Reports", self._on_reports_click, "▧"),
+            ("timetable", "view_timetable", "Timetable", self._on_timetable_click, "▦"),
+            ("notices", "issue_fee_notices", "Fee Notices", self._on_fee_notices_click, "✉"),
+        ):
+            if auth.has_permission(permission):
+                nav_item(key, text, command, symbol)
+        section("Administration")
+        admin_items = (
+            ("discounts", "manage_discounts", "Discounts", self._on_discount_click, "%"),
+            ("exemptions", "manage_exemptions", "Exemptions", self._on_exemption_click, "◇"),
+            ("fee_heads", "manage_fee_heads", "Fee Heads", self._on_fee_heads_click, "≡"),
+            ("fee_structure", "manage_fee_structure", "Fee Structure", self._on_fee_structure_click, "▦"),
+            ("late_fees", "apply_late_fees", "Apply Late Fees", self._on_late_fees_click, "+"),
+            ("years", "manage_academic_years", "Academic Years", self._on_academic_years_click, "□"),
+            ("reprint", "reprint_receipts", "Receipt Reprint", self._on_receipt_reprint_click, "↻"),
+            ("void", "void_payments", "Void Payment", self._on_void_payment_click, "×"),
+            ("audit", "view_audit_log", "Audit Log", self._on_audit_log_click, "⌕"),
         )
-        self.cashflow_canvas.pack(fill="both", expand=True)
-        self.cashflow_canvas.bind("<Configure>", self._draw_cashflow_chart)
-        self.backup_status_frame = tk.LabelFrame(
-            chart_frame, text="Backup Status", bg=self._sfms_palette["bg"], fg=self._sfms_palette["fg"], padx=10, pady=8
-        )
-        self.backup_status_frame.pack(fill="x", pady=(10, 0))
-        self.backup_status_var = tk.StringVar(value="Last successful backup: loading...")
-        tk.Label(
-            self.backup_status_frame, textvariable=self.backup_status_var, bg=self._sfms_palette["bg"],
-            fg=self._sfms_palette["fg"], justify="left", anchor="w"
-        ).pack(side="left", fill="x", expand=True)
-        ttk.Button(self.backup_status_frame, text="Backup Now", command=self._open_backup_window).pack(side="right")
-        ttk.Button(button_frame, text=label("main_collection", self.language), command=self._on_main_collection_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text=label("small_collection", self.language), command=self._on_small_collection_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text=label("exemption_collection", self.language), command=self._on_exemption_collection_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text=label("advance_payment", self.language), command=self._on_advance_payment_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text=label("dues", self.language), command=self._on_dues_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text=label("discounts", self.language), command=self._on_discount_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text=label("exemptions", self.language), command=self._on_exemption_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text=label("students", self.language), command=self._on_students_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text=label("fee_heads", self.language), command=self._on_fee_heads_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text=label("fee_structure", self.language), command=self._on_fee_structure_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text=label("academic_years", self.language), command=self._on_academic_years_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text=label("reports", self.language), command=self._on_reports_click).pack(fill="x", pady=5)
+        for key, permission, text, command, symbol in admin_items:
+            if auth.has_permission(permission):
+                nav_item(key, text, command, symbol)
         if auth.CURRENT_SESSION is not None and auth.CURRENT_SESSION.role == "ADMIN":
-            ttk.Button(button_frame, text=label("receipt_reprint", self.language), command=self._on_receipt_reprint_click).pack(fill="x", pady=5)
-            ttk.Button(button_frame, text=label("void_payment", self.language), command=self._on_void_payment_click).pack(fill="x", pady=5)
-            ttk.Button(button_frame, text="Cheque Management", command=self._on_cheques_click).pack(fill="x", pady=5)
-            ttk.Button(button_frame, text=label("audit_log", self.language), command=self._on_audit_log_click).pack(fill="x", pady=5)
-            ttk.Button(button_frame, text=label("fee_notices", self.language), command=self._on_fee_notices_click).pack(fill="x", pady=5)
-            ttk.Button(button_frame, text=label("user_management", self.language), command=self._on_users_click).pack(fill="x", pady=5)
-            ttk.Button(button_frame, text=label("settings", self.language), command=self._on_settings_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text=label("help", self.language), command=self._on_help_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text=label("about", self.language), command=self._on_about_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text=label("change_password", self.language), command=self._on_change_password_click).pack(fill="x", pady=5)
-        ttk.Button(button_frame, text=label("logout", self.language), command=self._on_logout_click).pack(fill="x", pady=5)
+            nav_item("users", "Users", self._on_users_click, "♟")
+            nav_item("permissions", "Accountant Permissions", self._on_permissions_click, "✓")
+            nav_item("settings", "Settings", self._on_settings_click, "⚙")
+        section("Account")
+        nav_item("backup", "Backup & Restore", self._open_backup_window, "⇩")
+        nav_item("password", "Change Password", self._on_change_password_click, "⚿")
+        nav_item("help", "Help", self._on_help_click, "?")
+        nav_item("logout", "Logout", self._on_logout_click, "↪")
+
+        header = tk.Frame(main, bg=palette["card"], height=82, highlightthickness=1,
+                          highlightbackground=palette["border"])
+        header.pack(fill="x")
+        header.pack_propagate(False)
+        title_box = tk.Frame(header, bg=palette["card"])
+        title_box.pack(side="left", fill="y", padx=28)
+        self.workspace_title = tk.StringVar(value="Dashboard")
+        tk.Label(title_box, textvariable=self.workspace_title, bg=palette["card"], fg=palette["text"],
+                 font=("Segoe UI", 20, "bold")).pack(anchor="w", pady=(14, 0))
+        tk.Label(title_box, text=_configured_school_name(), bg=palette["card"], fg=palette["muted"],
+                 font=("Segoe UI", 9)).pack(anchor="w")
+
+        profile = tk.Frame(header, bg=palette["card"])
+        profile.pack(side="right", padx=26, pady=13)
+        username = auth.CURRENT_SESSION.username if auth.CURRENT_SESSION else "Guest"
+        role = auth.CURRENT_SESSION.role.title() if auth.CURRENT_SESSION else "Not signed in"
+        tk.Label(profile, text=username, bg=palette["card"], fg=palette["text"],
+                 font=("Segoe UI", 10, "bold")).pack(anchor="e")
+        tk.Label(profile, text=role, bg=palette["card"], fg=palette["muted"],
+                 font=("Segoe UI", 8)).pack(anchor="e")
+        year_box = tk.Frame(header, bg=palette["card"])
+        year_box.pack(side="right", padx=(0, 16), pady=13)
+        tk.Label(year_box, text="Academic Year", bg=palette["card"], fg=palette["muted"],
+                 font=("Segoe UI", 8, "bold")).pack(anchor="e")
+        self.academic_year_var = tk.StringVar()
+        year_state = "readonly" if auth.has_permission("manage_academic_years") else "disabled"
+        self.academic_year_combo = ttk.Combobox(year_box, textvariable=self.academic_year_var,
+                                                state=year_state, width=15)
+        self.academic_year_combo.pack(anchor="e", pady=(3, 0))
+        self.academic_year_combo.bind("<<ComboboxSelected>>", self._academic_year_changed)
+        self._load_academic_years()
+
+        self.workspace = tk.Frame(main, bg=palette["page"])
+        self.workspace.pack(fill="both", expand=True)
+        self._show_dashboard()
+
+    def _set_active_navigation(self, key: str) -> None:
+        """Highlight the active sidebar destination."""
+        palette = self._workspace_palette
+        self._active_nav_key = key
+        for nav_key, button in self._nav_buttons.items():
+            active = nav_key == key
+            button.configure(
+                bg=palette["sidebar_active"] if active else palette["sidebar"],
+                fg=palette["accent"] if active else "white",
+                activeforeground=palette["accent"] if active else "white",
+            )
+
+    def _clear_workspace(self) -> None:
+        """Remove the current page before rendering the next destination."""
+        for child in self.workspace.winfo_children():
+            child._workspace_navigating = True
+            child.destroy()
+        self._active_page = None
+
+    def _show_workspace_page(self, page_class, title: str, key: str, *args, **kwargs):
+        """Render a primary module in the dashboard instead of a new window."""
+        auth.touch_session()
+        self._clear_workspace()
+        self.workspace_title.set(title)
+        self._set_active_navigation(key)
+        try:
+            page = page_class(self.workspace, *args, embedded=True, **kwargs)
+            page.pack(fill="both", expand=True)
+            page._workspace_on_close = self._show_dashboard
+            self._active_page = page
+            return page
+        except Exception:
+            self._show_dashboard()
+            raise
+
+    def _show_dashboard(self) -> None:
+        """Render the dashboard overview cards, alerts, and cashflow chart."""
+        self._clear_workspace()
+        self.workspace_title.set("Dashboard")
+        self._set_active_navigation("dashboard")
+        palette = self._workspace_palette
+        page = tk.Frame(self.workspace, bg=palette["page"])
+        page.pack(fill="both", expand=True, padx=24, pady=20)
+        self._active_page = page
+
+        welcome = tk.Frame(page, bg=palette["accent"], height=128)
+        welcome.pack(fill="x")
+        welcome.pack_propagate(False)
+        username = auth.CURRENT_SESSION.username if auth.CURRENT_SESSION else "User"
+        tk.Label(welcome, text=f"Hello {username},", bg=palette["accent"], fg="#ffbd68",
+                 font=("Segoe UI", 16, "bold")).pack(anchor="w", padx=24, pady=(22, 2))
+        tk.Label(welcome, text="Manage students, fees, reports and school records from one workspace.",
+                 bg=palette["accent"], fg="white", font=("Segoe UI", 11)).pack(anchor="w", padx=24)
+
+        self.notification_frame = tk.Frame(page, bg=palette["page"], height=80)
+        self.notification_frame.pack(fill="x", pady=(12, 0))
+        self.notification_frame.pack_propagate(False)
+
+        stats = tk.Frame(page, bg=palette["page"])
+        stats.pack(fill="x", pady=(4, 14))
+        summary = self._dashboard_summary()
+        for index, (label, value, color) in enumerate((
+            ("Total Students", summary["students"], "#e8f1ff"),
+            ("Collected Today", format(summary["today"], ",.2f"), "#e5f7ec"),
+            ("Outstanding Dues", format(summary["dues"], ",.2f"), "#fff0e3"),
+            ("Pending Cheques", summary["cheques"], "#f4e8ff"),
+        )):
+            card = tk.Frame(stats, bg=color, height=84)
+            card.pack(side="left", fill="x", expand=True, padx=(0 if index == 0 else 8, 0))
+            card.pack_propagate(False)
+            tk.Label(card, text=label, bg=color, fg=palette["muted"], font=("Segoe UI", 9)).pack(anchor="w", padx=16, pady=(14, 2))
+            tk.Label(card, text=str(value), bg=color, fg=palette["text"], font=("Segoe UI", 17, "bold")).pack(anchor="w", padx=16)
+
+        lower = tk.Frame(page, bg=palette["page"])
+        lower.pack(fill="both", expand=True)
+        chart_card = tk.Frame(lower, bg=palette["card"], highlightthickness=1, highlightbackground=palette["border"])
+        chart_card.pack(side="left", fill="both", expand=True, padx=(0, 10))
+        tk.Label(chart_card, text="Collection Overview", bg=palette["card"], fg=palette["text"],
+                 font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=18, pady=(14, 0))
+        self.cashflow_canvas = tk.Canvas(chart_card, bg=palette["card"], highlightthickness=0, height=260)
+        self.cashflow_canvas.pack(fill="both", expand=True, padx=12, pady=8)
+        self.cashflow_canvas.bind("<Configure>", self._draw_cashflow_chart)
+        side_card = tk.Frame(lower, bg=palette["card"], width=280, highlightthickness=1,
+                             highlightbackground=palette["border"])
+        side_card.pack(side="right", fill="y")
+        side_card.pack_propagate(False)
+        tk.Label(side_card, text="Backup Status", bg=palette["card"], fg=palette["text"],
+                 font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=18, pady=(16, 8))
+        self.backup_status_var = tk.StringVar(value="Last successful backup: loading...")
+        tk.Label(side_card, textvariable=self.backup_status_var, bg=palette["card"], fg=palette["muted"],
+                 wraplength=240, justify="left", anchor="w").pack(fill="x", padx=18)
+        ttk.Button(side_card, text="Backup Now", command=self._open_backup_window).pack(fill="x", padx=18, pady=14)
+        tk.Label(side_card, text="Quick Actions", bg=palette["card"], fg=palette["text"],
+                 font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=18, pady=(14, 8))
+        for text, command in (("Collect Fees", self._on_main_collection_click),
+                              ("Find Student", self._on_students_click),
+                              ("Generate Report", self._on_reports_click)):
+            ttk.Button(side_card, text=text, command=command).pack(fill="x", padx=18, pady=4)
+        self._load_notifications_async()
+
+    def _dashboard_summary(self) -> dict[str, float | int]:
+        """Load compact dashboard statistics without changing financial records."""
+        result: dict[str, float | int] = {"students": 0, "today": 0.0, "dues": 0.0, "cheques": 0}
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                result["students"] = conn.execute("SELECT COUNT(*) FROM students WHERE COALESCE(is_active,1)=1").fetchone()[0]
+                result["today"] = conn.execute(
+                    "SELECT COALESCE(SUM(amount_paid),0) FROM payments WHERE payment_date=? AND COALESCE(note,'') NOT LIKE 'VOID of %'",
+                    (datetime.now().strftime("%d-%m-%Y"),),
+                ).fetchone()[0]
+                result["dues"] = conn.execute(
+                    "SELECT COALESCE(SUM(balance),0) FROM charge_ledger WHERE balance>0"
+                ).fetchone()[0]
+                result["cheques"] = conn.execute(
+                    "SELECT COUNT(*) FROM payments WHERE UPPER(COALESCE(payment_mode,''))='CHEQUE' AND COALESCE(cheque_status,'PENDING')='PENDING'"
+                ).fetchone()[0]
+        except sqlite3.Error:
+            pass
+        return result
+
+    def _load_academic_years(self) -> None:
+        """Populate the dashboard year selector and show the current active year."""
+        with sqlite3.connect(DB_PATH) as conn:
+            rows = conn.execute("SELECT label,is_active FROM academic_years ORDER BY start_date DESC,label DESC").fetchall()
+        labels = [str(row[0]) for row in rows]
+        active = next((str(row[0]) for row in rows if row[1]), labels[0] if labels else "")
+        self.academic_year_combo.configure(values=labels)
+        self.academic_year_var.set(active)
+
+    def _academic_year_changed(self, _event=None) -> None:
+        """Allow only an administrator to switch the application-wide academic year."""
+        if not auth.has_permission("manage_academic_years"):
+            messagebox.showerror(
+                "Access denied",
+                "You do not have permission to change the active academic year.",
+                parent=self,
+            )
+            self._load_academic_years()
+            return
+        auth.touch_session()
+        label = self.academic_year_var.get().strip()
+        if not label:
+            return
+        try:
+            from ledger import ensure_student_charges
+            from ui_master_utils import audit, connect_db
+
+            with connect_db() as conn:
+                selected = conn.execute("SELECT id FROM academic_years WHERE label=?", (label,)).fetchone()
+                if selected is None:
+                    raise ValueError("The selected academic year no longer exists.")
+                old = conn.execute("SELECT id,label FROM academic_years WHERE is_active=1 LIMIT 1").fetchone()
+                conn.execute("UPDATE academic_years SET is_active=0")
+                conn.execute("UPDATE academic_years SET is_active=1 WHERE id=?", (selected["id"],))
+                ensure_student_charges(conn, label)
+                audit(conn, "ACADEMIC_YEAR_SELECT", "academic_years", selected["id"], dict(old) if old else None, {"label": label})
+        except Exception as exc:
+            messagebox.showerror("Academic Year", str(exc), parent=self)
+            self._load_academic_years()
+            return
+        self._load_notifications_async()
+
+    @auth.require_permission("manage_classes")
+    def _on_classes_click(self) -> None:
+        auth.touch_session()
+        from ui_classes import ClassSectionWindow
+
+        self._show_workspace_page(ClassSectionWindow, "Classes & Sections", "classes")
 
     def _bind_shortcuts(self) -> None:
         """Bind documented dashboard keyboard shortcuts to existing safe handlers."""
@@ -219,9 +461,10 @@ class DashboardWindow(tk.Toplevel):
         """Apply worker-loaded notifications and chart data on Tk's main thread."""
         self.cashflow_year = year_label
         self.cashflow_values = values
-        self._render_notifications(state)
-        self._render_backup_status(state.get("backup_status", {}))
-        self._draw_cashflow_chart()
+        if self._active_nav_key == "dashboard":
+            self._render_notifications(state)
+            self._render_backup_status(state.get("backup_status", {}))
+            self._draw_cashflow_chart()
 
     def _render_backup_status(self, status: dict) -> None:
         """Render last successful backup and consecutive failure count."""
@@ -230,7 +473,8 @@ class DashboardWindow(tk.Toplevel):
         text = f"Last successful backup: {last_success}"
         if failures > 0:
             text += f"\nConsecutive failures: {failures}"
-        self.backup_status_var.set(text)
+        if hasattr(self, "backup_status_var"):
+            self.backup_status_var.set(text)
 
     def show_backup_failure_warning(self, failures: int) -> None:
         """Show a non-dismissible repeated-backup-failure banner."""
@@ -278,9 +522,13 @@ class DashboardWindow(tk.Toplevel):
 
     def _render_notifications(self, state: dict) -> None:
         """Render priority dues and backup banners inside the reserved frame."""
-        if not self.winfo_exists():
+        if not self.winfo_exists() or self._active_nav_key != "dashboard":
             return
-        for child in self.notification_frame.winfo_children():
+        try:
+            children = self.notification_frame.winfo_children()
+        except tk.TclError:
+            return
+        for child in children:
             child.destroy()
         overdue = None
         for threshold, key, color in ((90, "overdue_90", "#b00020"), (60, "overdue_60", "#d2691e"), (30, "overdue_30", "#d4a900")):
@@ -319,21 +567,20 @@ class DashboardWindow(tk.Toplevel):
         self.dismissed_notifications.add(key)
         banner.destroy()
 
+    @auth.require_permission("view_dues")
     def _open_threshold_dues(self, threshold: int) -> None:
         """Open dues filtered to the selected overdue threshold."""
         auth.touch_session()
         from ui_dues import DuesWindow
 
-        DuesWindow(self, overdue_threshold=threshold)
+        self._show_workspace_page(DuesWindow, "Student Dues", "dues", overdue_threshold=threshold)
 
     def _open_backup_window(self) -> None:
         """Open the manual backup window."""
         auth.touch_session()
         from ui_backup import BackupWindow
 
-        backup_window = BackupWindow(self)
-        self.wait_window(backup_window)
-        self._load_notifications_async()
+        self._show_workspace_page(BackupWindow, "Backup & Restore", "backup")
 
     def _on_close(self) -> None:
         """Run the application-level close reminder."""
@@ -341,124 +588,186 @@ class DashboardWindow(tk.Toplevel):
 
         on_closing(self)
 
+    @auth.require_permission("collect_main_fees")
     def _on_main_collection_click(self) -> None:
         """Touch the session and open main fee collection."""
         auth.touch_session()
         from ui_collection_main import CollectionMainWindow
 
-        CollectionMainWindow(self)
+        self._show_workspace_page(CollectionMainWindow, "Main Fee Collection", "main_collection")
 
+    @auth.require_permission("collect_small_fees")
     def _on_small_collection_click(self) -> None:
         """Touch the session and open small fee collection."""
         auth.touch_session()
         from ui_collection_small import CollectionSmallWindow
 
-        CollectionSmallWindow(self)
+        self._show_workspace_page(CollectionSmallWindow, "Small Fee Collection", "small_collection")
 
+    @auth.require_permission("collect_exemption_fees")
     def _on_exemption_collection_click(self) -> None:
         """Touch the session and open exemption-aware collection."""
         auth.touch_session()
         from ui_collection_exemption import CollectionExemptionWindow
 
-        CollectionExemptionWindow(self)
+        self._show_workspace_page(CollectionExemptionWindow, "Exemption Collection", "exemption_collection")
 
+    @auth.require_permission("collect_advance_payments")
     def _on_advance_payment_click(self) -> None:
         """Touch the session and open advance payment collection."""
         auth.touch_session()
         from ui_advance_payment import AdvancePaymentWindow
 
-        AdvancePaymentWindow(self)
+        self._show_workspace_page(AdvancePaymentWindow, "Advance Payment", "advance")
 
+    @auth.require_permission("view_dues")
     def _on_dues_click(self) -> None:
         """Touch the session and open dues view."""
         auth.touch_session()
         from ui_dues import DuesWindow
 
-        DuesWindow(self)
+        self._show_workspace_page(DuesWindow, "Student Dues", "dues")
 
+    @auth.require_permission("manage_discounts")
     def _on_discount_click(self) -> None:
         """Touch the session and open discount recording."""
         auth.touch_session()
         from ui_discount import DiscountWindow
 
-        DiscountWindow(self)
+        self._show_workspace_page(DiscountWindow, "Discounts", "discounts")
 
+    @auth.require_permission("manage_exemptions")
     def _on_exemption_click(self) -> None:
         """Touch the session and open exemption recording."""
         auth.touch_session()
         from ui_exemption_record import ExemptionWindow
 
-        ExemptionWindow(self)
+        self._show_workspace_page(ExemptionWindow, "Exemptions", "exemptions")
 
+    @auth.require_permission("manage_admissions")
+    def _on_admissions_click(self) -> None:
+        """Open the dedicated new-admission workflow."""
+        auth.touch_session()
+        from ui_admissions import AdmissionsWindow
+
+        self._show_workspace_page(AdmissionsWindow, "New Admissions", "admissions")
+
+    @auth.require_permission("view_dues")
+    def _on_dues_register_click(self) -> None:
+        """Open the chronological student dues register."""
+        auth.touch_session()
+        from ui_dues_register import DuesRegisterWindow
+
+        self._show_workspace_page(DuesRegisterWindow, "Dues Register", "dues_register")
+
+    @auth.require_permission("manage_students")
     def _on_students_click(self) -> None:
         """Touch the session and open student management."""
         auth.touch_session()
         from ui_students import StudentWindow
 
-        StudentWindow(self)
+        self._show_workspace_page(StudentWindow, "Students", "students")
 
+    @auth.require_permission("manage_fee_heads")
     def _on_fee_heads_click(self) -> None:
         """Touch the session and open fee-head management."""
         auth.touch_session()
         from ui_fee_heads import FeeHeadsWindow
 
-        FeeHeadsWindow(self)
+        self._show_workspace_page(FeeHeadsWindow, "Fee Heads", "fee_heads")
 
+    @auth.require_permission("manage_fee_structure")
     def _on_fee_structure_click(self) -> None:
         """Touch the session and open fee-structure management."""
         auth.touch_session()
         from ui_fee_structure import FeeStructureWindow
 
-        FeeStructureWindow(self)
+        self._show_workspace_page(FeeStructureWindow, "Fee Structure", "fee_structure")
 
+    @auth.require_permission("manage_academic_years")
     def _on_academic_years_click(self) -> None:
         """Touch the session and open academic-year management."""
         auth.touch_session()
         from ui_academic_year import AcademicYearWindow
 
-        AcademicYearWindow(self)
+        self._show_workspace_page(AcademicYearWindow, "Academic Years", "years")
 
+    @auth.require_permission("view_student_details")
+    def _on_student_view_click(self) -> None:
+        """Open the read-only student profile search."""
+        auth.touch_session()
+        from ui_student_view import StudentViewWindow
+        self._show_workspace_page(StudentViewWindow, "View Student Details", "student_view")
+
+    @auth.require_permission("view_receipts")
+    def _on_receipt_history_click(self) -> None:
+        """Open read-only receipt history."""
+        auth.touch_session()
+        from ui_receipt_history import ReceiptHistoryWindow
+        self._show_workspace_page(ReceiptHistoryWindow, "Receipt History", "receipt_history")
+
+    @auth.require_permission("apply_late_fees")
+    def _on_late_fees_click(self) -> None:
+        """Open selective late-fee assessment."""
+        auth.touch_session()
+        from ui_late_fees import LateFeeWindow
+        self._show_workspace_page(LateFeeWindow, "Apply Late Fees", "late_fees")
+
+    @auth.require_permission("view_reports")
     def _on_reports_click(self) -> None:
         """Touch the session and open the PDF report center."""
         auth.touch_session()
         from ui_reports import ReportsWindow
 
-        ReportsWindow(self)
+        self._show_workspace_page(ReportsWindow, "Reports", "reports")
 
+    @auth.require_permission("view_timetable")
+    def _on_timetable_click(self) -> None:
+        """Open the automatic timetable workspace."""
+        auth.touch_session()
+        from ui_timetable import TimetableWindow
+
+        self._show_workspace_page(TimetableWindow, "Timetable", "timetable")
+
+    @auth.require_permission("reprint_receipts")
     def _on_receipt_reprint_click(self) -> None:
         """Touch the session and open administrator receipt reprinting."""
         auth.touch_session()
         from ui_receipt_reprint import ReprintWindow
 
-        ReprintWindow(self)
+        self._show_workspace_page(ReprintWindow, "Receipt Reprint", "reprint")
 
+    @auth.require_permission("void_payments")
     def _on_void_payment_click(self) -> None:
         """Touch the session and open administrator payment voiding."""
         auth.touch_session()
         from ui_void_payment import VoidPaymentWindow
 
-        VoidPaymentWindow(self)
+        self._show_workspace_page(VoidPaymentWindow, "Void Payment", "void")
 
+    @auth.require_permission("manage_cheques")
     def _on_cheques_click(self) -> None:
         """Open the administrator cheque lifecycle screen."""
         auth.touch_session()
         from ui_cheques import ChequeManagementWindow
 
-        ChequeManagementWindow(self)
+        self._show_workspace_page(ChequeManagementWindow, "Cheque Management", "cheques")
 
+    @auth.require_permission("view_audit_log")
     def _on_audit_log_click(self) -> None:
         """Touch the session and open the administrator audit viewer."""
         auth.touch_session()
         from ui_audit import AuditLogWindow
 
-        AuditLogWindow(self)
+        self._show_workspace_page(AuditLogWindow, "Audit Log", "audit")
 
+    @auth.require_permission("issue_fee_notices")
     def _on_fee_notices_click(self) -> None:
         """Open administrator fee-notice generation."""
         auth.touch_session()
         from ui_fee_notice import FeeNoticeWindow
 
-        FeeNoticeWindow(self)
+        self._show_workspace_page(FeeNoticeWindow, "Fee Notices", "notices")
 
 
     def _on_users_click(self) -> None:
@@ -466,21 +775,28 @@ class DashboardWindow(tk.Toplevel):
         auth.touch_session()
         from ui_users import UserManagementWindow
 
-        UserManagementWindow(self)
+        self._show_workspace_page(UserManagementWindow, "User Management", "users")
+
+    @auth.require_role("ADMIN")
+    def _on_permissions_click(self) -> None:
+        """Open per-accountant permission management."""
+        from ui_permissions import AccountantPermissionsWindow
+
+        self._show_workspace_page(AccountantPermissionsWindow, "Accountant Permissions", "permissions")
 
     def _on_settings_click(self) -> None:
         """Open administrator settings."""
         auth.touch_session()
         from ui_settings import SettingsWindow
 
-        SettingsWindow(self)
+        self._show_workspace_page(SettingsWindow, "Settings", "settings")
 
     def _on_help_click(self) -> None:
         """Open bundled offline help."""
         auth.touch_session()
         from ui_help import HelpWindow
 
-        HelpWindow(self)
+        self._show_workspace_page(HelpWindow, "Help", "help")
 
     def _on_about_click(self) -> None:
         """Open application information."""
@@ -492,7 +808,7 @@ class DashboardWindow(tk.Toplevel):
     def _on_change_password_click(self) -> None:
         """Touch the session and open the change-password window."""
         auth.touch_session()
-        ChangePasswordWindow(self)
+        self._show_workspace_page(ChangePasswordWindow, "Change Password", "password")
 
     def _on_logout_click(self) -> None:
         """Touch the session, log out, close the dashboard, and open login."""

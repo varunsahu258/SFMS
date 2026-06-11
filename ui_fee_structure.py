@@ -6,17 +6,19 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 import auth
+from ui_workspace import WorkspacePage
+from ui_date import DateEntry
 from config import SPLASH_BG, SPLASH_FG
 from ledger import ensure_student_charges
-from ui_master_utils import audit, connect_db, ensure_admin_write
+from ui_master_utils import audit, connect_db, ensure_permission_write
 
 
-class FeeStructureWindow(tk.Toplevel):
+class FeeStructureWindow(WorkspacePage):
     """Window for editing fee amounts and due dates by academic year and class."""
 
-    def __init__(self, master=None):
+    def __init__(self, master=None, *, embedded: bool = False):
         """Create the fee-structure window."""
-        super().__init__(master)
+        super().__init__(master, embedded=embedded)
         self.title("Fee Structure")
         self.geometry("820x520")
         self.configure(bg=SPLASH_BG)
@@ -68,7 +70,9 @@ class FeeStructureWindow(tk.Toplevel):
     def _fee_heads(self) -> list:
         """Return active fee heads for the grid."""
         with connect_db() as conn:
-            return conn.execute("SELECT id, name FROM fee_heads WHERE is_active = 1 ORDER BY name").fetchall()
+            return conn.execute(
+                "SELECT id, name FROM fee_heads WHERE is_active=1 AND COALESCE(is_one_time,0)=0 ORDER BY name"
+            ).fetchall()
 
     def load_grid(self) -> None:
         """Load fee-head rows and existing values into editable entries."""
@@ -95,7 +99,7 @@ class FeeStructureWindow(tk.Toplevel):
             self.due_vars[head["id"]] = due_var
             tk.Label(self.grid_frame, text=head["name"], bg=SPLASH_BG, fg=SPLASH_FG).grid(row=row_index, column=0, sticky="w", padx=4, pady=4)
             ttk.Entry(self.grid_frame, textvariable=amount_var).grid(row=row_index, column=1, sticky="ew", padx=4, pady=4)
-            ttk.Entry(self.grid_frame, textvariable=due_var).grid(row=row_index, column=2, sticky="ew", padx=4, pady=4)
+            DateEntry(self.grid_frame, textvariable=due_var, width=15).grid(row=row_index, column=2, sticky="ew", padx=4, pady=4)
         self.grid_frame.columnconfigure(1, weight=1)
         self.grid_frame.columnconfigure(2, weight=1)
 
@@ -127,10 +131,10 @@ class FeeStructureWindow(tk.Toplevel):
                 self.amount_vars[row["fee_head_id"]].set(f"{amount:.2f}")
                 self.due_vars[row["fee_head_id"]].set(row["due_date"] or "")
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("manage_fee_structure")
     def save(self) -> None:
         """Update or insert all edited fee-structure rows."""
-        if not ensure_admin_write():
+        if not ensure_permission_write("manage_fee_structure"):
             return
         academic_year = self.year_var.get()
         class_name = self.class_var.get()
