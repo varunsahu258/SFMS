@@ -68,20 +68,43 @@ def record_collection(conn, student_id: int, receipt_type: str, user_id: int,
 
 def record_advance_payment(conn, student_id: int, charge_id: int, fee_head_id: int,
                            amount, academic_year_id: int, academic_year: str,
-                           term: str, user_id: int) -> dict:
-    """Persist a term/year-scoped advance and its formal receipt atomically."""
+                           term: str, user_id: int, payment_mode: str = "CASH",
+                           cheque_no: str | None = None, bank: str | None = None,
+                           upi_reference: str | None = None) -> dict:
+    """Persist a term/year-scoped advance with its actual payment method."""
+    mode = str(payment_mode or "").strip().upper()
+    if mode not in {"CASH", "CHEQUE", "UPI"}:
+        raise ValueError("Payment mode must be Cash, Cheque, or UPI.")
+    cheque_no = str(cheque_no or "").strip()
+    bank = str(bank or "").strip()
+    upi_reference = str(upi_reference or "").strip()
+    if mode == "CHEQUE" and (not cheque_no or not bank):
+        raise ValueError("Cheque number and bank are required.")
+    if mode == "UPI" and not upi_reference:
+        raise ValueError("UPI transaction reference is required.")
     receipt_no = generate_receipt_no(conn)
+    payment_date = today_str()
+    note = f"ADVANCE | Year: {academic_year} | Term: {term}"
     with conn:
         payment = conn.execute(
             """INSERT INTO payments(student_id,receipt_no,fee_head_id,amount_due,
                        amount_paid,balance,payment_date,collected_by,payment_mode,note,hash,
-                       payment_intent,allocated_academic_year_id,allocated_term)
-               VALUES(?,?,?,?,?,?,?,?,'CASH',?,?,'ADVANCE',?,?)""",
-            (student_id, receipt_no, fee_head_id, 0, str(amount), 0, today_str(), user_id,
-             f"ADVANCE | Year: {academic_year} | Term: {term}", "",
-             academic_year_id, term),
+                       cheque_number,upi_reference,cheque_status,payment_intent,
+                       allocated_academic_year_id,allocated_term)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'ADVANCE',?,?)""",
+            (student_id, receipt_no, fee_head_id, 0, str(amount), 0, payment_date,
+             user_id, mode, note, "", cheque_no if mode == "CHEQUE" else None,
+             upi_reference if mode == "UPI" else None,
+             "PENDING" if mode == "CHEQUE" else None, academic_year_id, term),
         )
         allocate_payment(conn, payment.lastrowid, charge_id, str(amount), "ADVANCE")
+        if mode == "CHEQUE":
+            conn.execute(
+                """INSERT INTO cheque_tracker(payment_id,cheque_no,bank,amount,
+                          collected_on,status,updated_at)
+                   VALUES(?,?,?,?,?,'PENDING',?)""",
+                (payment.lastrowid, cheque_no, bank, str(amount), payment_date, now_str()),
+            )
         receipt = conn.execute(
             """INSERT INTO receipts(receipt_no,student_id,total_paid,receipt_type,
                        printed_at,printed_by,reprint_count)
@@ -93,7 +116,8 @@ def record_advance_payment(conn, student_id: int, charge_id: int, fee_head_id: i
             conn, "ADVANCE_PAYMENT", user_id,
             {"table": "payments", "record_id": payment.lastrowid,
              "receipt_no": receipt_no, "amount": str(amount),
-             "academic_year": academic_year, "term": term},
+             "academic_year": academic_year, "term": term,
+             "payment_mode": mode},
         )
     return {"receipt_id": int(receipt.lastrowid), "receipt_no": receipt_no,
             "payment_id": int(payment.lastrowid)}

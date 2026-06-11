@@ -248,3 +248,39 @@ def test_main_collection_requires_a_checkbox_selection():
     }
     with pytest.raises(ValueError, match="Select at least one fee head"):
         selected_main_collection_items([charge], {}, {}, "Cash", 9999999)
+
+
+def test_advance_payment_persists_upi_and_cheque_modes(monkeypatch):
+    import base64
+    from financial_operations import record_advance_payment
+
+    monkeypatch.setenv("SFMS_INTEGRITY_KEY", base64.urlsafe_b64encode(b"d" * 32).decode("ascii"))
+    conn = sqlite3.connect(":memory:")
+    schema(conn)
+    ensure_student_charges(conn, "2026-27", 1)
+    charge = charge_rows(conn, 1, "2026-27")[0]
+
+    upi = record_advance_payment(
+        conn, 1, charge["charge_id"], 1, 20, 2, "2026-27", "01-04-2026", 1,
+        "UPI", upi_reference="UPI-ADV-1",
+    )
+    upi_row = conn.execute(
+        "SELECT payment_mode,upi_reference,cheque_number FROM payments WHERE id=?",
+        (upi["payment_id"],),
+    ).fetchone()
+    assert tuple(upi_row) == ("UPI", "UPI-ADV-1", None)
+
+    cheque = record_advance_payment(
+        conn, 1, charge["charge_id"], 1, 15, 2, "2026-27", "01-04-2026", 1,
+        "CHEQUE", cheque_no="CH-42", bank="School Bank",
+    )
+    cheque_row = conn.execute(
+        "SELECT payment_mode,cheque_number,cheque_status FROM payments WHERE id=?",
+        (cheque["payment_id"],),
+    ).fetchone()
+    assert tuple(cheque_row) == ("CHEQUE", "CH-42", "PENDING")
+    tracker = conn.execute(
+        "SELECT cheque_no,bank,status FROM cheque_tracker WHERE payment_id=?",
+        (cheque["payment_id"],),
+    ).fetchone()
+    assert tuple(tracker) == ("CH-42", "School Bank", "PENDING")

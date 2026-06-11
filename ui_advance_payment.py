@@ -11,7 +11,10 @@ from config import SPLASH_BG, SPLASH_FG
 from ledger import active_academic_year, ensure_student_charges
 from money import OverpaymentError, max_payment_amount, validate_payment_amount
 from receipt_printing import PrintFailureDialog, print_committed_receipt
-from ui_collection_common import connect_db, require_session, search_students
+from ui_collection_common import (
+    MODE_LABELS, MODE_TO_DB, ChequeDetailDialog, UPIDetailDialog,
+    connect_db, require_session, search_students,
+)
 from financial_operations import record_advance_payment
 
 
@@ -29,7 +32,10 @@ class AdvancePaymentWindow(WorkspacePage):
         self.amount_var = tk.StringVar()
         self.fee_head_var = tk.StringVar()
         self.term_var = tk.StringVar()
+        self.payment_mode_var = tk.StringVar(value="Cash")
+        self.payment_detail: dict[str, str] = {}
         self.selected_student_id: int | None = None
+        self.selected_student_name = ""
         self.fee_head_ids: dict[str, int] = {}
         self._build_widgets()
 
@@ -56,7 +62,14 @@ class AdvancePaymentWindow(WorkspacePage):
         self.term_combo.grid(row=1, column=1, pady=5)
         tk.Label(form, text="Amount", bg=SPLASH_BG, fg=SPLASH_FG).grid(row=2, column=0, sticky="w", pady=5)
         ttk.Entry(form, textvariable=self.amount_var).grid(row=2, column=1, pady=5)
-        ttk.Button(form, text="Save Advance", command=self.save).grid(row=3, column=0, columnspan=2, pady=16)
+        tk.Label(form, text="Payment Mode", bg=SPLASH_BG, fg=SPLASH_FG).grid(row=3, column=0, sticky="w", pady=5)
+        self.mode_combo = ttk.Combobox(
+            form, textvariable=self.payment_mode_var, values=MODE_LABELS,
+            state="readonly", width=32,
+        )
+        self.mode_combo.grid(row=3, column=1, pady=5)
+        self.mode_combo.bind("<<ComboboxSelected>>", self.capture_mode_detail)
+        ttk.Button(form, text="Save Advance", command=self.save).grid(row=4, column=0, columnspan=2, pady=16)
 
     def search(self) -> None:
         """Search active students by name or Aadhaar."""
@@ -73,6 +86,10 @@ class AdvancePaymentWindow(WorkspacePage):
         if not selection:
             return
         self.selected_student_id = int(selection[0])
+        values = self.tree.item(selection[0], "values")
+        self.selected_student_name = str(values[1]) if len(values) > 1 else ""
+        self.payment_mode_var.set("Cash")
+        self.payment_detail = {}
         with connect_db() as conn:
             student = conn.execute("SELECT class FROM students WHERE id = ?", (self.selected_student_id,)).fetchone()
             year = active_academic_year(conn)
@@ -97,6 +114,24 @@ class AdvancePaymentWindow(WorkspacePage):
         if labels:
             self.fee_head_var.set(labels[0])
             self.term_var.set(rows[0]["due_date"])
+
+    def capture_mode_detail(self, _event=None) -> None:
+        """Capture cheque or UPI details when the operator selects that mode."""
+        auth.touch_session()
+        selected = self.payment_mode_var.get()
+        self.payment_detail = {}
+        if selected == "Cheque":
+            dialog = ChequeDetailDialog(self)
+            if dialog.result:
+                self.payment_detail = dict(dialog.result)
+            else:
+                self.payment_mode_var.set("Cash")
+        elif selected == "UPI":
+            dialog = UPIDetailDialog(self)
+            if dialog.result:
+                self.payment_detail = {"upi_reference": dialog.result["transaction_ref"]}
+            else:
+                self.payment_mode_var.set("Cash")
 
     def save(self) -> None:
         """Insert an immutable, term-scoped advance payment and print its receipt."""
@@ -124,11 +159,29 @@ class AdvancePaymentWindow(WorkspacePage):
             except ValueError as exc:
                 messagebox.showerror("Validation", str(exc), parent=self)
                 return
+            mode = MODE_TO_DB[self.payment_mode_var.get()]
+            cheque_no = self.payment_detail.get("cheque_no", "")
+            bank = self.payment_detail.get("bank", "")
+            upi_reference = self.payment_detail.get("upi_reference", "")
+            if mode == "CHEQUE" and (not cheque_no or not bank):
+                messagebox.showerror("Cheque details", "Cheque number and bank are required.", parent=self)
+                return
+            if mode == "UPI" and not upi_reference:
+                messagebox.showerror("UPI details", "UPI transaction reference is required.", parent=self)
+                return
+            if not messagebox.askyesno(
+                "Confirm advance payment",
+                f"Save an advance payment of {amount} for {self.selected_student_name}\n"
+                f"under {self.fee_head_var.get()}?",
+                parent=self,
+            ):
+                return
             try:
                 result = record_advance_payment(
                     conn, self.selected_student_id, charge_id, fee_head_id, amount,
                     option["academic_year_id"], option["academic_year"],
                     str(option["due_date"]), auth.CURRENT_SESSION.user_id,
+                    mode, cheque_no, bank, upi_reference,
                 )
             except Exception as exc:
                 messagebox.showerror("Advance payment", str(exc), parent=self)

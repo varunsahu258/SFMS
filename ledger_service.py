@@ -53,7 +53,7 @@ class LedgerService:
             f"""
             WITH balances AS ({self._balance_rows_sql(where)})
             SELECT b.*,s.name AS student,s.class AS student_class,s.section AS student_section,
-                   s.scholar_no,s.aadhaar,s.phone,s.mobile2,fh.name AS fee_head
+                   s.scholar_no,s.father_name,s.aadhaar,s.phone,s.mobile2,fh.name AS fee_head
             FROM balances b
             JOIN students s ON s.id=b.student_id
             JOIN fee_heads fh ON fh.id=b.fee_head_id

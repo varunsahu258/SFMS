@@ -230,7 +230,9 @@ class CollectionBaseWindow(WorkspacePage):
         self.mode_vars.clear()
         with connect_db() as conn:
             self.fee_items = fee_rows(conn, self.selected_student_id, self.register_types, self.force_exemption_view)
-        if self.max_rows is not None:
+        hidden_count = 0
+        if self.max_rows is not None and len(self.fee_items) > self.max_rows:
+            hidden_count = len(self.fee_items) - self.max_rows
             self.fee_items = self.fee_items[: self.max_rows]
         headers = ("Fee Head", "Outstanding", "Paid", "Discount / Exemption", "Amount Paying", "Mode", "Status")
         for column, header in enumerate(headers):
@@ -251,6 +253,14 @@ class CollectionBaseWindow(WorkspacePage):
             combo.bind("<<ComboboxSelected>>", lambda _event, charge_id=item["charge_id"]: self.capture_mode_detail(charge_id))
             status = "EXEMPT" if item["is_exempt"] else ""
             tk.Label(self.fee_frame, text=status, bg=SPLASH_BG, fg="#999999" if status else SPLASH_FG).grid(row=row_index, column=6, padx=4, pady=4)
+        if hidden_count:
+            tk.Label(
+                self.fee_frame,
+                text=(f"{hidden_count} additional fee head(s) are not shown in Small Collection. "
+                      "Use Main Collection to view and collect every outstanding head."),
+                bg="#fff3cd", fg="#6b4f00", font=("Segoe UI", 10, "bold"),
+                anchor="w", justify="left", padx=10, pady=8,
+            ).grid(row=len(self.fee_items) + 1, column=0, columnspan=7, sticky="ew", padx=4, pady=(10, 4))
         self.update_summary()
 
     def capture_mode_detail(self, charge_id: int) -> None:

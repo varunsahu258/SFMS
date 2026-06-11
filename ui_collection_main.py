@@ -148,11 +148,13 @@ class CollectionMainWindow(CollectionBaseWindow):
         bottom.pack(fill="x", pady=(4, 0))
         tk.Label(bottom, textvariable=self.summary_var, bg=PAGE_BG, fg=TEXT,
                  font=("Segoe UI", 10, "bold"), anchor="w").pack(side="left", fill="x", expand=True)
-        tk.Button(
+        self.save_button = tk.Button(
             bottom, text="Review and save payment", command=self.confirm_and_save,
             bg=ACCENT, fg="white", activebackground="#49309f", activeforeground="white",
-            relief="flat", bd=0, padx=22, pady=10, font=("Segoe UI", 10, "bold"), cursor="hand2",
-        ).pack(side="right")
+            disabledforeground="#a9a4b2", relief="flat", bd=0, padx=22, pady=10,
+            font=("Segoe UI", 10, "bold"), cursor="hand2", state="disabled",
+        )
+        self.save_button.pack(side="right")
         entry.focus_set()
 
     def load_dues(self) -> None:
@@ -193,19 +195,43 @@ class CollectionMainWindow(CollectionBaseWindow):
                  font=("Segoe UI", 10)).pack(side="left")
 
         list_card = tk.Frame(self.fee_frame, bg=CARD_BG, highlightthickness=1,
-                             highlightbackground=BORDER, padx=12, pady=10)
+                             highlightbackground=BORDER)
         list_card.pack(fill="both", expand=True)
+        header_frame = tk.Frame(list_card, bg="#eee9f7", padx=12, pady=8)
+        header_frame.pack(fill="x")
         headers = ("Select", "Fee head", "Outstanding", "Due date", "Amount to collect")
         widths = (9, 30, 18, 18, 22)
         for column, (text, width) in enumerate(zip(headers, widths)):
-            tk.Label(list_card, text=text, width=width, anchor="w", bg=CARD_BG, fg=MUTED,
-                     font=("Segoe UI", 9, "bold")).grid(row=0, column=column, sticky="ew", padx=5, pady=(2, 8))
+            tk.Label(header_frame, text=text, width=width, anchor="w", bg="#eee9f7", fg=TEXT,
+                     font=("Segoe UI", 9, "bold")).grid(row=0, column=column, sticky="ew", padx=5)
+
+        body = tk.Frame(list_card, bg=CARD_BG)
+        body.pack(fill="both", expand=True)
+        fee_canvas = tk.Canvas(body, bg=CARD_BG, highlightthickness=0, height=210)
+        fee_scrollbar = ttk.Scrollbar(body, orient="vertical", command=fee_canvas.yview)
+        fee_canvas.configure(yscrollcommand=fee_scrollbar.set)
+        fee_scrollbar.pack(side="right", fill="y")
+        fee_canvas.pack(side="left", fill="both", expand=True)
+        rows_frame = tk.Frame(fee_canvas, bg=CARD_BG, padx=12, pady=6)
+        rows_window = fee_canvas.create_window((0, 0), window=rows_frame, anchor="nw")
+        rows_frame.bind(
+            "<Configure>",
+            lambda _event: fee_canvas.configure(scrollregion=fee_canvas.bbox("all")),
+        )
+        fee_canvas.bind(
+            "<Configure>",
+            lambda event: fee_canvas.itemconfigure(rows_window, width=event.width),
+        )
+        fee_canvas.bind(
+            "<MouseWheel>",
+            lambda event: fee_canvas.yview_scroll(int(-event.delta / 120), "units"),
+        )
 
         if not self.fee_items:
-            tk.Label(list_card, text="No outstanding main-register fees for this student.",
+            tk.Label(rows_frame, text="No outstanding main-register fees for this student.",
                      bg=CARD_BG, fg=MUTED, font=("Segoe UI", 11)).grid(
-                         row=1, column=0, columnspan=5, sticky="w", padx=8, pady=20)
-        for row_index, item in enumerate(self.fee_items, 1):
+                         row=0, column=0, columnspan=5, sticky="w", padx=8, pady=20)
+        for row_index, item in enumerate(self.fee_items):
             charge_id = int(item["charge_id"])
             selected_var = tk.BooleanVar(value=False)
             amount_var = tk.StringVar(value="")
@@ -213,20 +239,21 @@ class CollectionMainWindow(CollectionBaseWindow):
             self.amount_vars[charge_id] = amount_var
             self.mode_vars[charge_id] = tk.StringVar(value="Cash")
             check = ttk.Checkbutton(
-                list_card, variable=selected_var,
+                rows_frame, variable=selected_var,
                 command=lambda value=charge_id: self._toggle_head(value),
             )
             check.grid(row=row_index, column=0, sticky="w", padx=8, pady=7)
-            tk.Label(list_card, text=item["name"], bg=CARD_BG, fg=TEXT,
+            tk.Label(rows_frame, text=item["name"], width=30, anchor="w", bg=CARD_BG, fg=TEXT,
                      font=("Segoe UI", 10, "bold")).grid(row=row_index, column=1, sticky="w", padx=5)
-            tk.Label(list_card, text=format_currency(item["balance"]), bg=CARD_BG, fg=TEXT,
-                     font=("Segoe UI", 10)).grid(row=row_index, column=2, sticky="w", padx=5)
-            tk.Label(list_card, text=item.get("due_date") or "Not set", bg=CARD_BG, fg=MUTED,
-                     font=("Segoe UI", 10)).grid(row=row_index, column=3, sticky="w", padx=5)
-            entry = ttk.Entry(list_card, textvariable=amount_var, state="disabled", width=18)
+            tk.Label(rows_frame, text=format_currency(item["balance"]), width=18, anchor="w",
+                     bg=CARD_BG, fg=TEXT, font=("Segoe UI", 10)).grid(row=row_index, column=2, sticky="w", padx=5)
+            tk.Label(rows_frame, text=item.get("due_date") or "Not set", width=18, anchor="w",
+                     bg=CARD_BG, fg=MUTED, font=("Segoe UI", 10)).grid(row=row_index, column=3, sticky="w", padx=5)
+            entry = ttk.Entry(rows_frame, textvariable=amount_var, state="disabled", width=18)
             entry.grid(row=row_index, column=4, sticky="w", padx=5)
             entry.bind("<KeyRelease>", lambda _event: self.update_summary())
             self.amount_entries[charge_id] = entry
+        self.save_button.configure(state="normal" if self.fee_items else "disabled")
 
         controls = tk.Frame(self.fee_frame, bg=PAGE_BG)
         controls.pack(fill="x", pady=(12, 0))

@@ -211,10 +211,10 @@ class ReportsWindow(WorkspacePage):
             ttk.Radiobutton(type_holder, text=text, value=value, variable=report_type).pack(side="left", padx=(0, 14))
 
         from_holder = self._row(frame, "From Date (DD-MM-YYYY)", 1)
-        from_entry = ttk.Entry(from_holder, textvariable=from_var, width=28)
+        from_entry = ttk.Entry(from_holder, textvariable=from_var, width=28, state="disabled")
         from_entry.pack(side="left")
         to_holder = self._row(frame, "To Date (DD-MM-YYYY)", 2)
-        to_entry = ttk.Entry(to_holder, textvariable=to_var, width=28)
+        to_entry = ttk.Entry(to_holder, textvariable=to_var, width=28, state="disabled")
         to_entry.pack(side="left")
         mode_vars = self._collection_mode_controls(frame, 3)
 

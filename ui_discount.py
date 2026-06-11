@@ -38,6 +38,7 @@ class DiscountWindow(WorkspacePage):
         """Build student search and discount form."""
         top = tk.Frame(self, bg=SPLASH_BG)
         top.pack(fill="x", padx=12, pady=10)
+        tk.Label(top, text="Search Student", bg=SPLASH_BG, fg=SPLASH_FG).pack(side="left")
         ttk.Entry(top, textvariable=self.search_var, width=34).pack(side="left", padx=6)
         ttk.Button(top, text="Search", command=self.search).pack(side="left")
         self.tree = ttk.Treeview(self, columns=("id", "name", "class", "aadhaar"), show="headings", height=6)
@@ -127,5 +128,5 @@ class DiscountWindow(WorkspacePage):
                  "student_id": self.selected_student_id, "charge_id": charge["charge_id"],
                  "amount": str(amount), "reason": self.reason_var.get().strip()},
             )
-            add_adjustment(conn, charge["charge_id"], "DISCOUNT", str(amount), "discounts", cursor.lastrowid, self.reason_var.get().strip(), auth.CURRENT_SESSION.user_id)
+
         messagebox.showinfo("Discount", "Discount saved.")

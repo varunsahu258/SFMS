@@ -64,10 +64,11 @@ def test_dues_ui_aggregation_returns_one_total_per_student():
     from ui_dues import aggregate_student_dues
 
     rows = [
-        {"student_id": 1, "student": "Asha", "student_class": "1", "student_section": "A", "scholar_no": "S1", "aadhaar": "", "phone": "999", "mobile2": "", "outstanding": 100, "due_date": "15-06-2026"},
-        {"student_id": 1, "student": "Asha", "student_class": "1", "student_section": "A", "scholar_no": "S1", "aadhaar": "", "phone": "999", "mobile2": "", "outstanding": 250, "due_date": "01-06-2026"},
+        {"student_id": 1, "student": "Asha", "student_class": "1", "student_section": "A", "scholar_no": "S1", "father_name": "Ramesh", "aadhaar": "", "phone": "999", "mobile2": "", "outstanding": 100, "due_date": "15-06-2026"},
+        {"student_id": 1, "student": "Asha", "student_class": "1", "student_section": "A", "scholar_no": "S1", "father_name": "Ramesh", "aadhaar": "", "phone": "999", "mobile2": "", "outstanding": 250, "due_date": "01-06-2026"},
     ]
     result = aggregate_student_dues(rows)
     assert len(result) == 1
     assert result[0]["total_due"] == 350
     assert result[0]["oldest_due_date"] == "01-06-2026"
+    assert result[0]["father_name"] == "Ramesh"

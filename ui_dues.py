@@ -28,6 +28,7 @@ def aggregate_student_dues(rows: list[dict]) -> list[dict]:
             "student_class": row.get("student_class") or "",
             "student_section": row.get("student_section") or "",
             "scholar_no": row.get("scholar_no") or "",
+            "father_name": row.get("father_name") or "",
             "aadhaar": row.get("aadhaar") or "",
             "phone": row.get("phone") or "",
             "mobile2": row.get("mobile2") or "",
@@ -90,21 +91,28 @@ class DuesWindow(WorkspacePage):
         tk.Label(top, text="Class", bg=SPLASH_BG, fg=SPLASH_FG).pack(side="left", padx=(12, 0))
         self.class_combo = ttk.Combobox(top, textvariable=self.class_var, state="readonly", width=18)
         self.class_combo.pack(side="left", padx=6)
+        self.class_combo.bind("<<ComboboxSelected>>", self._class_selected)
         ttk.Button(top, text="Load", command=self.load_dues).pack(side="left", padx=6)
-        ttk.Button(top, text="Export", command=self.export).pack(side="right")
+        self.export_button = ttk.Button(top, text="Export", command=self.export, state="disabled")
+        self.export_button.pack(side="right")
         ttk.Button(top, text="Print Dues Statement", command=self.print_student_statement).pack(side="right", padx=4)
         ttk.Button(top, text="Issue TC", command=self.issue_tc).pack(side="right", padx=4)
-        columns = ("scholar_no", "student", "class", "total_due", "due_date", "days")
+        columns = ("scholar_no", "student", "father_name", "class", "total_due", "due_date", "days")
         self.tree = ttk.Treeview(self, columns=columns, show="headings")
         for column, heading, width in (
-            ("scholar_no", "Scholar No.", 110), ("student", "Student", 260),
-            ("class", "Class / Section", 150), ("total_due", "Total Due", 140),
+            ("scholar_no", "Scholar No.", 105), ("student", "Student", 210),
+            ("father_name", "Father's Name", 210),
+            ("class", "Class / Section", 140), ("total_due", "Total Due", 130),
             ("due_date", "Due On", 120), ("days", "Days Overdue", 110),
         ):
             self.tree.heading(column, text=heading)
             self.tree.column(column, width=width)
         self.tree.tag_configure("overdue", foreground="red")
         self.tree.pack(fill="both", expand=True, padx=12, pady=8)
+
+    def _class_selected(self, _event=None) -> None:
+        """Keep export availability synchronized with the class selection."""
+        self.export_button.configure(state="normal" if self.class_var.get().strip() else "disabled")
 
     def _load_classes(self) -> None:
         """Populate class dropdown from database rows."""
@@ -128,14 +136,15 @@ class DuesWindow(WorkspacePage):
             if search:
                 existing_ids = {row["student_id"] for row in rows}
                 students = conn.execute(
-                    """SELECT id,name,class,section,scholar_no,aadhaar,phone,mobile2
+                    """SELECT id,name,class,section,scholar_no,father_name,aadhaar,phone,mobile2
                        FROM students WHERE is_active=1 ORDER BY class,name"""
                 ).fetchall()
                 for student in students:
                     candidate = {
                         "student_id": int(student["id"]), "student": student["name"] or "",
                         "student_class": student["class"] or "", "student_section": student["section"] or "",
-                        "scholar_no": student["scholar_no"] or "", "aadhaar": student["aadhaar"] or "",
+                        "scholar_no": student["scholar_no"] or "", "father_name": student["father_name"] or "",
+                        "aadhaar": student["aadhaar"] or "",
                         "phone": student["phone"] or "", "mobile2": student["mobile2"] or "",
                         "total_due": 0.0, "oldest_due_date": "",
                     }
@@ -144,7 +153,7 @@ class DuesWindow(WorkspacePage):
             rows = [row for row in rows if (
                 (not class_filter or row["student_class"] == class_filter)
                 and (not search or any(search in str(row.get(field) or "").casefold() for field in (
-                    "student", "scholar_no", "aadhaar", "phone", "mobile2",
+                    "student", "father_name", "scholar_no", "aadhaar", "phone", "mobile2",
                 )))
             )]
         if self.overdue_threshold is not None:
@@ -153,7 +162,7 @@ class DuesWindow(WorkspacePage):
             days = days_overdue(row["oldest_due_date"])
             class_text = f"{row['student_class']}{' / ' + row['student_section'] if row['student_section'] else ''}"
             values = (
-                row["scholar_no"], row["student"], class_text,
+                row["scholar_no"], row["student"], row["father_name"], class_text,
                 format_currency(row["total_due"]), row["oldest_due_date"], days,
             )
             row_data = dict(row) | {"days_overdue": days}
@@ -221,6 +230,12 @@ class DuesWindow(WorkspacePage):
         class_name = self.class_var.get().strip()
         if not class_name:
             messagebox.showerror("Dues export", "Select a class before exporting the classwise report.")
+            return
+        if not messagebox.askyesno(
+            "Confirm dues export",
+            f"Generate the dues report for {class_name}?",
+            parent=self,
+        ):
             return
         with connect_db() as conn:
             academic_year = active_academic_year(conn)
