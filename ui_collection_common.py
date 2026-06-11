@@ -9,17 +9,26 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 import auth
-from config import DB_PATH, SPLASH_BG, SPLASH_FG
+from ui_workspace import WorkspacePage
+from config import DB_PATH
 from ledger import active_academic_year, charge_rows
 from money import OverpaymentError, max_payment_amount, validate_payment_amount
 from payment_controls import normalize_reference
 from receipt_printing import PrintFailureDialog, print_committed_receipt
 from financial_operations import record_collection
 from utils import format_currency
+from ui_theme import apply_theme
 
 PAYMENT_MODES = ("CASH", "CHEQUE", "UPI")
 MODE_LABELS = ("Cash", "Cheque", "UPI")
 MODE_TO_DB = {"Cash": "CASH", "Cheque": "CHEQUE", "UPI": "UPI", "CASH": "CASH", "CHEQUE": "CHEQUE", "UPI": "UPI"}
+
+PAGE_BG = "#f5f3fa"
+CARD_BG = "#ffffff"
+TEXT = "#201a2b"
+MUTED = "#766f80"
+BORDER = "#e4deef"
+HEADER_BG = "#eee9f7"
 
 
 def connect_db() -> sqlite3.Connection:
@@ -95,7 +104,9 @@ class ChequeDetailDialog(tk.Toplevel):
     def __init__(self, master):
         """Create a modal cheque detail dialog."""
         super().__init__(master)
+        apply_theme(self)
         self.title("Cheque Details")
+        self.configure(bg=PAGE_BG)
         self.result = None
         self.cheque_var = tk.StringVar()
         self.bank_var = tk.StringVar()
@@ -106,7 +117,7 @@ class ChequeDetailDialog(tk.Toplevel):
 
     def _build(self) -> None:
         """Build cheque detail fields."""
-        frame = tk.Frame(self, padx=16, pady=16)
+        frame = tk.Frame(self, bg=CARD_BG, padx=22, pady=20, highlightthickness=1, highlightbackground=BORDER)
         frame.pack(fill="both", expand=True)
         tk.Label(frame, text="Cheque No").grid(row=0, column=0, sticky="w", pady=4)
         ttk.Entry(frame, textvariable=self.cheque_var).grid(row=0, column=1, pady=4)
@@ -130,7 +141,9 @@ class UPIDetailDialog(tk.Toplevel):
     def __init__(self, master):
         """Create a modal UPI detail dialog."""
         super().__init__(master)
+        apply_theme(self)
         self.title("UPI Details")
+        self.configure(bg=PAGE_BG)
         self.result = None
         self.ref_var = tk.StringVar()
         self._build()
@@ -140,7 +153,7 @@ class UPIDetailDialog(tk.Toplevel):
 
     def _build(self) -> None:
         """Build UPI detail fields."""
-        frame = tk.Frame(self, padx=16, pady=16)
+        frame = tk.Frame(self, bg=CARD_BG, padx=22, pady=20, highlightthickness=1, highlightbackground=BORDER)
         frame.pack(fill="both", expand=True)
         tk.Label(frame, text="Transaction Ref").grid(row=0, column=0, sticky="w", pady=4)
         ttk.Entry(frame, textvariable=self.ref_var).grid(row=0, column=1, pady=4)
@@ -156,7 +169,7 @@ class UPIDetailDialog(tk.Toplevel):
         self.destroy()
 
 
-class CollectionBaseWindow(tk.Toplevel):
+class CollectionBaseWindow(WorkspacePage):
     """Base window for BIG/SMALL/exemption fee collection flows."""
 
     register_types: tuple[str, ...] = ("BIG", "BOTH")
@@ -164,12 +177,12 @@ class CollectionBaseWindow(tk.Toplevel):
     max_rows: int | None = None
     force_exemption_view = False
 
-    def __init__(self, master=None):
+    def __init__(self, master=None, *, embedded: bool = False):
         """Create the shared fee collection screen."""
-        super().__init__(master)
+        super().__init__(master, embedded=embedded)
         self.title(f"{self.receipt_type} Fee Collection")
         self.geometry("1040x640")
-        self.configure(bg=SPLASH_BG)
+        self.configure(bg=PAGE_BG)
         self.search_var = tk.StringVar()
         self.selected_student_id: int | None = None
         self.fee_items: list[dict] = []
@@ -179,32 +192,68 @@ class CollectionBaseWindow(tk.Toplevel):
         self._build_widgets()
 
     def _build_widgets(self) -> None:
-        """Build search results, fee-entry grid, and confirmation controls."""
-        top = tk.Frame(self, bg=SPLASH_BG)
-        top.pack(fill="x", padx=12, pady=10)
-        tk.Label(top, text="Search Student", bg=SPLASH_BG, fg=SPLASH_FG).pack(side="left")
-        entry = ttk.Entry(top, textvariable=self.search_var, width=40)
-        entry.pack(side="left", padx=8)
-        entry.bind("<KeyRelease>", lambda _event: self.search())
-        ttk.Button(top, text="Search", command=self.search).pack(side="left")
+        """Build a modern search-first collection workspace with a fixed action bar."""
+        self.configure(bg=PAGE_BG)
+        page = tk.Frame(self, bg=PAGE_BG)
+        page.pack(fill="both", expand=True, padx=24, pady=20)
 
-        self.student_tree = ttk.Treeview(self, columns=("id", "name", "class"), show="headings", height=5)
-        for column, heading, width in (("id", "ID", 60), ("name", "Name", 280), ("class", "Class", 120)):
+        tk.Label(page, text=f"{self.receipt_type.title()} Fee Collection", bg=PAGE_BG, fg=TEXT,
+                 font=("Segoe UI", 20, "bold"), anchor="w").pack(fill="x")
+        tk.Label(page, text="Find a student, review outstanding heads, then enter only the amount received.",
+                 bg=PAGE_BG, fg=MUTED, font=("Segoe UI", 10), anchor="w").pack(fill="x", pady=(3, 14))
+
+        search_card = tk.Frame(page, bg=CARD_BG, padx=16, pady=14,
+                               highlightthickness=1, highlightbackground=BORDER)
+        search_card.pack(fill="x")
+        tk.Label(search_card, text="Search student", bg=CARD_BG, fg=TEXT,
+                 font=("Segoe UI", 10, "bold")).pack(side="left")
+        entry = ttk.Entry(search_card, textvariable=self.search_var, width=42)
+        entry.pack(side="left", fill="x", expand=True, padx=12)
+        entry.bind("<KeyRelease>", lambda _event: self.search())
+        entry.bind("<Return>", lambda _event: self.search())
+        ttk.Button(search_card, text="Search", command=self.search, style="Accent.TButton").pack(side="left")
+
+        self.student_tree = ttk.Treeview(page, columns=("id", "name", "class"), show="headings", height=5)
+        for column, heading, width in (("id", "ID", 75), ("name", "Student name", 360), ("class", "Class", 160)):
             self.student_tree.heading(column, text=heading)
-            self.student_tree.column(column, width=width)
-        self.student_tree.pack(fill="x", padx=12)
+            self.student_tree.column(column, width=width, anchor="w")
+        self.student_tree.pack(fill="x", pady=(12, 0))
         self.student_tree.bind("<<TreeviewSelect>>", lambda _event: self.load_selected_student())
 
-        self.fee_frame = tk.Frame(self, bg=SPLASH_BG)
-        self.fee_frame.pack(fill="both", expand=True, padx=12, pady=12)
-        bottom = tk.Frame(self, bg=SPLASH_BG)
-        bottom.pack(fill="x", padx=12, pady=(0, 12))
-        tk.Label(bottom, textvariable=self.summary_var, bg=SPLASH_BG, fg=SPLASH_FG).pack(side="left")
-        ttk.Button(bottom, text="Confirm and Save", command=self.confirm_and_save).pack(side="right")
+        self.fee_frame = tk.Frame(page, bg=PAGE_BG)
+        self.fee_frame.pack(fill="both", expand=True, pady=(14, 8))
+        self._show_empty_fee_state("Select a student to load outstanding fees.")
+
+        bottom = tk.Frame(page, bg=PAGE_BG)
+        bottom.pack(fill="x", pady=(4, 0))
+        tk.Label(bottom, textvariable=self.summary_var, bg=PAGE_BG, fg=TEXT,
+                 font=("Segoe UI", 10, "bold"), anchor="w").pack(side="left", fill="x", expand=True)
+        self.save_button = ttk.Button(bottom, text="Review and save payment",
+                                      command=self.confirm_and_save, style="Accent.TButton",
+                                      state="disabled")
+        self.save_button.pack(side="right")
+        entry.focus_set()
+
+    def _show_empty_fee_state(self, message: str) -> None:
+        """Show a card explaining the next action when no fee rows are loaded."""
+        for child in self.fee_frame.winfo_children():
+            child.destroy()
+        card = tk.Frame(self.fee_frame, bg=CARD_BG, highlightthickness=1,
+                        highlightbackground=BORDER, padx=18, pady=22)
+        card.pack(fill="x")
+        tk.Label(card, text=message, bg=CARD_BG, fg=MUTED,
+                 font=("Segoe UI", 11), anchor="w").pack(fill="x")
 
     def search(self) -> None:
-        """Search students and display matching rows."""
+        """Search students and reset any previously loaded payment context."""
         auth.touch_session()
+        self.selected_student_id = None
+        self.fee_items = []
+        self.amount_vars.clear()
+        self.mode_vars.clear()
+        self.summary_var.set("Select a student to load dues.")
+        self.save_button.configure(state="disabled")
+        self._show_empty_fee_state("Select a student to load outstanding fees.")
         for item in self.student_tree.get_children():
             self.student_tree.delete(item)
         for row in search_students(self.search_var.get().strip()):
@@ -220,8 +269,9 @@ class CollectionBaseWindow(tk.Toplevel):
         self.load_dues()
 
     def load_dues(self) -> None:
-        """Load fee-head dues for the selected student."""
+        """Load every matching fee head in a scrollable card without silent truncation."""
         if self.selected_student_id is None:
+            self.save_button.configure(state="disabled")
             return
         for child in self.fee_frame.winfo_children():
             child.destroy()
@@ -229,27 +279,63 @@ class CollectionBaseWindow(tk.Toplevel):
         self.mode_vars.clear()
         with connect_db() as conn:
             self.fee_items = fee_rows(conn, self.selected_student_id, self.register_types, self.force_exemption_view)
-        if self.max_rows is not None:
-            self.fee_items = self.fee_items[: self.max_rows]
-        headers = ("Fee Head", "Outstanding", "Paid", "Discount / Exemption", "Amount Paying", "Mode", "Status")
-        for column, header in enumerate(headers):
-            tk.Label(self.fee_frame, text=header, bg=SPLASH_BG, fg=SPLASH_FG, font=("Segoe UI", 10, "bold")).grid(row=0, column=column, sticky="ew", padx=4, pady=4)
-        for row_index, item in enumerate(self.fee_items, start=1):
-            amount_var = tk.StringVar(value=f"{item['amount_paying']:.2f}")
+        if not self.fee_items:
+            self.summary_var.set("No outstanding fees for the selected student.")
+            self.save_button.configure(state="disabled")
+            self._show_empty_fee_state("No outstanding fee heads were found for this student.")
+            return
+
+        card = tk.Frame(self.fee_frame, bg=CARD_BG, highlightthickness=1, highlightbackground=BORDER)
+        card.pack(fill="both", expand=True)
+        header = tk.Frame(card, bg=HEADER_BG, padx=12, pady=8)
+        header.pack(fill="x")
+        headers = ("Fee head", "Outstanding", "Paid", "Adjustment", "Amount received", "Mode", "Status")
+        widths = (25, 14, 12, 14, 16, 12, 10)
+        for column, (label, width) in enumerate(zip(headers, widths)):
+            tk.Label(header, text=label, width=width, anchor="w", bg=HEADER_BG, fg=TEXT,
+                     font=("Segoe UI", 9, "bold")).grid(row=0, column=column, sticky="ew", padx=4)
+
+        body = tk.Frame(card, bg=CARD_BG)
+        body.pack(fill="both", expand=True)
+        canvas = tk.Canvas(body, bg=CARD_BG, highlightthickness=0, height=230)
+        scrollbar = ttk.Scrollbar(body, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        rows = tk.Frame(canvas, bg=CARD_BG, padx=12, pady=6)
+        rows_window = canvas.create_window((0, 0), window=rows, anchor="nw")
+        rows.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(rows_window, width=event.width))
+        canvas.bind("<MouseWheel>", lambda event: canvas.yview_scroll(int(-event.delta / 120), "units"))
+
+        for row_index, item in enumerate(self.fee_items):
+            # Blank-by-default amounts prevent accidentally collecting every outstanding head.
+            amount_var = tk.StringVar(value="")
             mode_var = tk.StringVar(value=item["mode"])
             self.amount_vars[item["charge_id"]] = amount_var
             self.mode_vars[item["charge_id"]] = mode_var
             state = "disabled" if item["is_exempt"] else "normal"
-            tk.Label(self.fee_frame, text=item["name"], bg=SPLASH_BG, fg=SPLASH_FG).grid(row=row_index, column=0, sticky="w", padx=4, pady=4)
-            tk.Label(self.fee_frame, text=format_currency(item["amount_due"]), bg=SPLASH_BG, fg=SPLASH_FG).grid(row=row_index, column=1, padx=4, pady=4)
-            tk.Label(self.fee_frame, text=format_currency(item["paid"]), bg=SPLASH_BG, fg=SPLASH_FG).grid(row=row_index, column=2, padx=4, pady=4)
-            tk.Label(self.fee_frame, text=format_currency(item["discount"]), bg=SPLASH_BG, fg=SPLASH_FG).grid(row=row_index, column=3, padx=4, pady=4)
-            ttk.Entry(self.fee_frame, textvariable=amount_var, state=state, width=12).grid(row=row_index, column=4, padx=4, pady=4)
-            combo = ttk.Combobox(self.fee_frame, textvariable=mode_var, values=MODE_LABELS, state="readonly", width=10)
-            combo.grid(row=row_index, column=5, padx=4, pady=4)
+            values = (
+                (item["name"], 25, TEXT, "bold"),
+                (format_currency(item["amount_due"]), 14, TEXT, "normal"),
+                (format_currency(item["paid"]), 12, TEXT, "normal"),
+                (format_currency(item["discount"]), 14, MUTED, "normal"),
+            )
+            for column, (value, width, colour, weight) in enumerate(values):
+                tk.Label(rows, text=value, width=width, anchor="w", bg=CARD_BG, fg=colour,
+                         font=("Segoe UI", 10, weight)).grid(row=row_index, column=column, sticky="w", padx=4, pady=7)
+            amount_entry = ttk.Entry(rows, textvariable=amount_var, state=state, width=15)
+            amount_entry.grid(row=row_index, column=4, sticky="w", padx=4, pady=7)
+            amount_entry.bind("<KeyRelease>", lambda _event: self.update_summary())
+            combo = ttk.Combobox(rows, textvariable=mode_var, values=MODE_LABELS, state="readonly", width=11)
+            combo.grid(row=row_index, column=5, sticky="w", padx=4, pady=7)
             combo.bind("<<ComboboxSelected>>", lambda _event, charge_id=item["charge_id"]: self.capture_mode_detail(charge_id))
-            status = "EXEMPT" if item["is_exempt"] else ""
-            tk.Label(self.fee_frame, text=status, bg=SPLASH_BG, fg="#999999" if status else SPLASH_FG).grid(row=row_index, column=6, padx=4, pady=4)
+            status = "EXEMPT" if item["is_exempt"] else "Ready"
+            tk.Label(rows, text=status, width=10, anchor="w", bg=CARD_BG,
+                     fg=MUTED if item["is_exempt"] else "#287a49",
+                     font=("Segoe UI", 9, "bold")).grid(row=row_index, column=6, sticky="w", padx=4, pady=7)
+
+        self.save_button.configure(state="normal")
         self.update_summary()
 
     def capture_mode_detail(self, charge_id: int) -> None:
@@ -257,14 +343,19 @@ class CollectionBaseWindow(tk.Toplevel):
         auth.touch_session()
         item = self._item_by_charge(charge_id)
         mode = self.mode_vars[charge_id].get()
+        item.update({"cheque_no": "", "bank": "", "note": ""})
         if mode == "Cheque":
             dialog = ChequeDetailDialog(self)
             if dialog.result:
                 item.update(dialog.result)
+            else:
+                self.mode_vars[charge_id].set("Cash")
         elif mode == "UPI":
             dialog = UPIDetailDialog(self)
             if dialog.result:
                 item["note"] = dialog.result["transaction_ref"]
+            else:
+                self.mode_vars[charge_id].set("Cash")
 
     def _item_by_charge(self, charge_id: int) -> dict:
         """Return the loaded fee item for a student-charge id."""

@@ -7,6 +7,8 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 import auth
+from ui_workspace import WorkspacePage
+from ui_date import DateEntry
 from config import DB_PATH
 from payment_controls import list_pending_cheques, set_cheque_status
 from utils import format_currency, today_str
@@ -20,12 +22,12 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
-class ChequeManagementWindow(tk.Toplevel):
+class ChequeManagementWindow(WorkspacePage):
     """List pending cheques and permit audited terminal status changes."""
 
-    @auth.require_role("ADMIN")
-    def __init__(self, master=None):
-        super().__init__(master)
+    @auth.require_permission("manage_cheques")
+    def __init__(self, master=None, *, embedded: bool = False):
+        super().__init__(master, embedded=embedded)
         self.title("Cheque Management")
         self.geometry("980x560")
         self.bank_ref_var = tk.StringVar()
@@ -47,7 +49,7 @@ class ChequeManagementWindow(tk.Toplevel):
         form = ttk.Frame(self)
         form.pack(fill="x", padx=12, pady=(0, 12))
         ttk.Label(form, text="Cleared Date").pack(side="left")
-        ttk.Entry(form, textvariable=self.cleared_date_var, width=12).pack(side="left", padx=5)
+        DateEntry(form, textvariable=self.cleared_date_var, width=12).pack(side="left", padx=5)
         ttk.Label(form, text="Bank Reference").pack(side="left", padx=(12, 0))
         ttk.Entry(form, textvariable=self.bank_ref_var, width=24).pack(side="left", padx=5)
         ttk.Button(form, text="Mark Cleared", command=lambda: self._change("CLEARED")).pack(side="left", padx=4)
