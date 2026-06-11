@@ -14,6 +14,7 @@ from PIL import Image, ImageTk
 import auth
 from audit import log_action
 from config import DB_PATH
+from ui_theme import apply_theme
 
 
 def setup_is_complete() -> bool:
@@ -37,10 +38,12 @@ class SetupWizardWindow(tk.Toplevel):
         if auth.CURRENT_SESSION is None or auth.CURRENT_SESSION.role != "ADMIN":
             raise PermissionError("Initial setup requires an authenticated administrator.")
         super().__init__(master)
+        apply_theme(self)
         self.on_complete = on_complete
         self.title("SFMS First-Run Setup")
-        self.geometry("720x540")
-        self.resizable(False, False)
+        self.geometry("760x620")
+        self.minsize(680, 540)
+        self.resizable(True, True)
         self.transient(master)
         self.grab_set()
         self.protocol("WM_DELETE_WINDOW", lambda: None)
@@ -54,14 +57,25 @@ class SetupWizardWindow(tk.Toplevel):
         self.start_date = tk.StringVar(value=f"01-04-{datetime.now().year}")
         self.end_date = tk.StringVar(value=f"31-03-{datetime.now().year + 1}")
         self.logo_image = None
-        self.content = ttk.Frame(self, padding=24)
-        self.content.pack(fill="both", expand=True)
-        self.navigation = ttk.Frame(self, padding=(24, 8, 24, 20))
-        self.navigation.pack(fill="x")
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+        self.content = ttk.Frame(self, padding=(28, 24, 28, 12))
+        self.content.grid(row=0, column=0, sticky="nsew")
+
+        # Keep navigation in a fixed grid row.  Previously the expanding content
+        # frame could consume the fixed-height window and push Next/Finish below it.
+        self.navigation = ttk.Frame(self, padding=(28, 12, 28, 22))
+        self.navigation.grid(row=1, column=0, sticky="ew")
+        self.navigation.columnconfigure(1, weight=1)
         self.back_button = ttk.Button(self.navigation, text="Back", command=self.back)
-        self.back_button.pack(side="left")
-        self.next_button = ttk.Button(self.navigation, text="Next", command=self.next)
-        self.next_button.pack(side="right")
+        self.back_button.grid(row=0, column=0, sticky="w")
+        self.step_label = ttk.Label(self.navigation, text="", style="Muted.TLabel")
+        self.step_label.grid(row=0, column=1)
+        self.next_button = ttk.Button(
+            self.navigation, text="Next", command=self.next, style="Accent.TButton"
+        )
+        self.next_button.grid(row=0, column=2, sticky="e")
+        self.bind("<Return>", lambda _event: self.next())
         self.show_step()
 
     def _clear(self) -> None:
@@ -76,7 +90,8 @@ class SetupWizardWindow(tk.Toplevel):
     def show_step(self) -> None:
         self._clear()
         self.back_button.configure(state="disabled" if self.step == 0 else "normal")
-        self.next_button.configure(text="Finish" if self.step == 4 else "Next")
+        self.next_button.configure(text="Save Setup and Continue" if self.step == 4 else "Next")
+        self.step_label.configure(text=f"Step {self.step + 1} of 5")
         (self._welcome, self._school, self._logo, self._year, self._complete)[self.step]()
 
     def _welcome(self) -> None:
@@ -174,34 +189,41 @@ class SetupWizardWindow(tk.Toplevel):
             self.show_step()
 
     def finish(self) -> None:
-        password_hash = bcrypt.hashpw(self.password.get().encode(), bcrypt.gensalt()).decode()
-        with _connect() as conn:
-            admin = conn.execute(
-                "SELECT id FROM users WHERE role='ADMIN' AND is_active=1 ORDER BY id LIMIT 1"
-            ).fetchone()
-            if admin is None:
-                raise RuntimeError("No active designated administrator account exists.")
-            admin_id = int(admin[0])
-            conn.execute("UPDATE users SET password_hash=? WHERE id=?", (password_hash, admin_id))
-            settings = {
-                "school_name": self.school_name.get().strip(), "school_address": self.school_address.get().strip(),
-                "logo_path": self.logo_path.get().strip(), "setup_complete": "1", "ui_theme": "light", "ui_language": "en",
-            }
-            for key, value in settings.items():
+        """Persist setup atomically and keep the wizard open if saving fails."""
+        self.next_button.configure(state="disabled")
+        try:
+            password_hash = bcrypt.hashpw(self.password.get().encode(), bcrypt.gensalt()).decode()
+            with _connect() as conn:
+                admin = conn.execute(
+                    "SELECT id FROM users WHERE role='ADMIN' AND is_active=1 ORDER BY id LIMIT 1"
+                ).fetchone()
+                if admin is None:
+                    raise RuntimeError("No active designated administrator account exists.")
+                admin_id = int(admin[0])
+                conn.execute("UPDATE users SET password_hash=? WHERE id=?", (password_hash, admin_id))
+                settings = {
+                    "school_name": self.school_name.get().strip(), "school_address": self.school_address.get().strip(),
+                    "logo_path": self.logo_path.get().strip(), "setup_complete": "1", "ui_theme": "light", "ui_language": "en",
+                }
+                for key, value in settings.items():
+                    conn.execute(
+                        "INSERT INTO settings(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        (key, value),
+                    )
+                conn.execute("UPDATE academic_years SET is_active=0")
                 conn.execute(
-                    "INSERT INTO settings(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                    (key, value),
+                    "INSERT INTO academic_years(label,start_date,end_date,is_active) VALUES (?,?,?,1) "
+                    "ON CONFLICT(label) DO UPDATE SET start_date=excluded.start_date,end_date=excluded.end_date,is_active=1",
+                    (self.year_label.get().strip(), self.start_date.get(), self.end_date.get()),
                 )
-            conn.execute("UPDATE academic_years SET is_active=0")
-            conn.execute(
-                "INSERT INTO academic_years(label,start_date,end_date,is_active) VALUES (?,?,?,1) "
-                "ON CONFLICT(label) DO UPDATE SET start_date=excluded.start_date,end_date=excluded.end_date,is_active=1",
-                (self.year_label.get().strip(), self.start_date.get(), self.end_date.get()),
-            )
-            log_action(
-                conn, auth.CURRENT_SESSION.user_id, "setup_completed", "settings",
-                "setup_complete", "0", "1",
-            )
+                log_action(
+                    conn, auth.CURRENT_SESSION.user_id, "setup_completed", "settings",
+                    "setup_complete", "0", "1",
+                )
+        except Exception as exc:
+            self.next_button.configure(state="normal")
+            messagebox.showerror("Setup could not be saved", str(exc), parent=self)
+            return
         self.grab_release()
         self.destroy()
         if self.on_complete:

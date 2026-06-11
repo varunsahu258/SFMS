@@ -9,8 +9,10 @@ from tkinter import messagebox, simpledialog, ttk
 import bcrypt
 
 import auth
+from ui_workspace import WorkspacePage
 from audit import log_action
 from config import DB_PATH
+from ui_theme import apply_theme
 
 MIN_PASSWORD_LENGTH = 8
 FORCE_CHANGE_PREFIX = "force_password_change_user_"
@@ -28,12 +30,12 @@ def _password_hash(password: str) -> str:
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 
-class UserManagementWindow(tk.Toplevel):
+class UserManagementWindow(WorkspacePage):
     """Create, activate, reset, and unlock accountant accounts."""
 
     @auth.require_role("ADMIN")
-    def __init__(self, master=None):
-        super().__init__(master)
+    def __init__(self, master=None, *, embedded: bool = False):
+        super().__init__(master, embedded=embedded)
         self.title("User Management")
         self.geometry("850x520")
         self.transient(master)
@@ -155,6 +157,7 @@ class MandatoryPasswordChangeDialog(tk.Toplevel):
 
     def __init__(self, master, on_complete):
         super().__init__(master)
+        apply_theme(self)
         self.on_complete = on_complete
         self.title("Change Temporary Password")
         self.geometry("430x260")
