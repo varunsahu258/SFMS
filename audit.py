@@ -70,5 +70,28 @@ def log_operational_event(action, user_id, details=None, *, conn=None) -> bool:
 
 
 def log_action(conn, user_id, action, table, record_id, old=None, new=None) -> None:
-    """Compatibility wrapper for non-financial legacy call sites."""
-    log_operational_event(action, user_id, {"table": table, "record_id": record_id, "old": old, "new": new}, conn=conn)
+    """Best-effort legacy audit that preserves the old/new column layout."""
+    try:
+        conn.execute(
+            """INSERT INTO audit_log(timestamp,user_id,action,table_name,record_id,
+                                      old_value,new_value,tamper_attempt)
+               VALUES(?,?,?,?,?,?,?,?)""",
+            (
+                now_str(),
+                user_id,
+                action,
+                table,
+                record_id,
+                _serialize(old),
+                _serialize(new),
+                1 if str(action).startswith(TAMPER_ACTION_PREFIX) else 0,
+            ),
+        )
+    except Exception:
+        _LOGGER.exception(
+            "Legacy audit write failed: action=%s user_id=%s table=%s record_id=%s",
+            action,
+            user_id,
+            table,
+            record_id,
+        )

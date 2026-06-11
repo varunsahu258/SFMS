@@ -6,6 +6,8 @@ import sqlite3
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+from ui_theme import apply_theme
+
 from config import APP_TITLE, DB_PATH, DEFAULT_ADMIN_USERNAME
 from database import create_initial_admin
 from security_utils import validate_bootstrap_password
@@ -24,6 +26,7 @@ class FirstTimeSetupWindow(tk.Toplevel):
             master = tk.Tk()
             master.withdraw()
         super().__init__(master)
+        apply_theme(self)
         self.on_complete = on_complete
         self.title("First-Time Setup")
         self.geometry("470x320")

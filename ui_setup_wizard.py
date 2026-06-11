@@ -14,6 +14,7 @@ from PIL import Image, ImageTk
 import auth
 from audit import log_action
 from config import DB_PATH
+from ui_theme import apply_theme
 
 
 def setup_is_complete() -> bool:
@@ -37,6 +38,7 @@ class SetupWizardWindow(tk.Toplevel):
         if auth.CURRENT_SESSION is None or auth.CURRENT_SESSION.role != "ADMIN":
             raise PermissionError("Initial setup requires an authenticated administrator.")
         super().__init__(master)
+        apply_theme(self)
         self.on_complete = on_complete
         self.title("SFMS First-Run Setup")
         self.geometry("720x540")
