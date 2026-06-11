@@ -50,13 +50,27 @@ def test_dues_export_requires_class_state_and_confirmation():
     assert "father_name" in inspect.getsource(DuesWindow.load_dues)
 
 
-def test_small_collection_warns_when_rows_are_truncated():
+def test_small_collection_shows_every_head_in_a_scrollable_list_with_blank_amounts():
     from ui_collection_common import CollectionBaseWindow
+    from ui_collection_small import CollectionSmallWindow
 
     source = inspect.getsource(CollectionBaseWindow.load_dues)
-    assert "hidden_count" in source
-    assert "additional fee head(s) are not shown" in source
-    assert "Use Main Collection" in source
+    assert CollectionSmallWindow.max_rows is None
+    assert "tk.Canvas" in source
+    assert "ttk.Scrollbar" in source
+    assert 'amount_var = tk.StringVar(value="")' in source
+    assert "hidden_count" not in source
+
+
+def test_workspace_pages_apply_the_shared_modern_theme():
+    from ui_workspace import WorkspacePage
+    from ui_theme import LIGHT, apply_theme
+
+    source = inspect.getsource(WorkspacePage.__init__)
+    assert "apply_theme(theme_target)" in source
+    assert LIGHT["bg"] == "#f5f3fa"
+    assert LIGHT["accent"] == "#5b3fc0"
+    assert "Accent.TButton" in inspect.getsource(apply_theme)
 
 
 def test_collection_report_date_entries_start_disabled():

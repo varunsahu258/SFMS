@@ -6,6 +6,8 @@ import sqlite3
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+from ui_theme import apply_theme
+
 from config import DB_PATH
 from integrity import authorize_new_machine
 from security_utils import MACHINE_AUTHORIZATION_REQUIRED_MESSAGE
@@ -19,6 +21,7 @@ class MachineAuthorizationWindow(tk.Toplevel):
             master = tk.Tk()
             master.withdraw()
         super().__init__(master)
+        apply_theme(self)
         self.on_complete = on_complete
         self.title("Owner Authorization Required")
         self.geometry("520x280")

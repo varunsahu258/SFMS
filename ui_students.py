@@ -9,6 +9,8 @@ import tkinter as tk
 from datetime import datetime, timedelta
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
+from ui_theme import apply_theme
+
 import auth
 from ui_workspace import WorkspacePage
 from config import SPLASH_BG, SPLASH_FG, STATUS_ACTIVE
@@ -419,6 +421,7 @@ class DuesClearanceDialog(tk.Toplevel):
 
     def __init__(self, master, student_id: int, on_issued=None):
         super().__init__(master)
+        apply_theme(self)
         self.student_id = student_id
         self.on_issued = on_issued
         self.reason_var = tk.StringVar()
@@ -479,6 +482,7 @@ class StudentDialog(tk.Toplevel):
 
     def __init__(self, master, title: str, on_saved=None):
         super().__init__(master)
+        apply_theme(self)
         self.on_saved = on_saved
         self.title(title)
         self.geometry("760x690")
@@ -663,6 +667,7 @@ class BulkImportDialog(tk.Toplevel):
 
     def __init__(self, master, on_imported=None):
         super().__init__(master)
+        apply_theme(self)
         self.on_imported = on_imported
         self.rows: list[dict] = []
         self.title("Bulk Import Students")
@@ -832,6 +837,7 @@ class PromoteClassDialog(tk.Toplevel):
     def __init__(self, master, on_saved=None):
         """Create the promotion dialog."""
         super().__init__(master)
+        apply_theme(self)
         self.on_saved = on_saved
         self.title("Promote Class")
         self.geometry("520x500")

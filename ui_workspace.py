@@ -21,6 +21,12 @@ class WorkspacePage(tk.Frame):
             self._standalone_window = tk.Toplevel(master)
             parent = self._standalone_window
         super().__init__(parent, **kwargs)
+        from ui_theme import apply_theme
+
+        theme_target = self._standalone_window or self.winfo_toplevel()
+        self.language, self.ui_font = apply_theme(theme_target)
+        palette = theme_target._sfms_palette
+        self.configure(bg=palette["bg"])
         if not self._embedded:
             self.pack(fill="both", expand=True)
 
