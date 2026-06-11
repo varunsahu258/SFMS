@@ -6,17 +6,18 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 import auth
+from ui_workspace import WorkspacePage
 from config import SPLASH_BG, SPLASH_FG
 from ledger import ensure_student_charges
 from ui_master_utils import audit, connect_db, ensure_permission_write
 
 
-class AcademicYearWindow(tk.Toplevel):
+class AcademicYearWindow(WorkspacePage):
     """Window for adding, activating, and safely deleting academic years."""
 
-    def __init__(self, master=None):
+    def __init__(self, master=None, *, embedded: bool = False):
         """Create the academic-year management window."""
-        super().__init__(master)
+        super().__init__(master, embedded=embedded)
         self.title("Academic Years")
         self.geometry("640x430")
         self.configure(bg=SPLASH_BG)

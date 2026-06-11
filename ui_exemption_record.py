@@ -7,6 +7,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 import auth
+from ui_workspace import WorkspacePage
 from audit import log_financial_action
 from config import SPLASH_BG, SPLASH_FG
 from ledger import active_academic_year, add_adjustment, ensure_student_charges
@@ -14,13 +15,13 @@ from ui_collection_common import connect_db, search_students
 from utils import now_str
 
 
-class ExemptionWindow(tk.Toplevel):
+class ExemptionWindow(WorkspacePage):
     """Admin-only window for recording fee-head exemptions."""
 
     @auth.require_permission("manage_exemptions")
-    def __init__(self, master=None):
+    def __init__(self, master=None, *, embedded: bool = False):
         """Create the exemption window."""
-        super().__init__(master)
+        super().__init__(master, embedded=embedded)
         self.title("Exemptions")
         self.geometry("820x580")
         self.configure(bg=SPLASH_BG)

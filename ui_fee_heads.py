@@ -6,19 +6,20 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 import auth
+from ui_workspace import WorkspacePage
 from config import SPLASH_BG, SPLASH_FG
 from ui_master_utils import audit, connect_db, ensure_permission_write
 
 REGISTER_TYPES = ("BIG", "SMALL", "BOTH")
 
 
-class FeeHeadsWindow(tk.Toplevel):
+class FeeHeadsWindow(WorkspacePage):
     """Admin-only fee-head management window."""
 
     @auth.require_permission("manage_fee_heads")
-    def __init__(self, master=None):
+    def __init__(self, master=None, *, embedded: bool = False):
         """Create the fee-head window."""
-        super().__init__(master)
+        super().__init__(master, embedded=embedded)
         self.title("Fee Heads")
         self.geometry("620x420")
         self.configure(bg=SPLASH_BG)

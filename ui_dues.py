@@ -8,6 +8,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 import auth
+from ui_workspace import WorkspacePage
 from config import SPLASH_BG, SPLASH_FG
 from ledger import active_academic_year, ensure_student_charges
 from ledger_service import LedgerService
@@ -56,13 +57,13 @@ def _due_date_sort_key(value: str) -> datetime:
 
 
 
-class DuesWindow(tk.Toplevel):
+class DuesWindow(WorkspacePage):
     """Display student-wise or class-wide unpaid dues."""
 
     @auth.require_permission("view_dues")
-    def __init__(self, master=None, overdue_threshold: int | None = None):
+    def __init__(self, master=None, overdue_threshold: int | None = None, *, embedded: bool = False):
         """Create the dues window with an optional overdue-days filter."""
-        super().__init__(master)
+        super().__init__(master, embedded=embedded)
         self.overdue_threshold = overdue_threshold
         self.title("Dues")
         self.geometry("1050x580")

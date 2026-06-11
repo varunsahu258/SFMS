@@ -7,6 +7,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 import auth
+from ui_workspace import WorkspacePage
 from config import DB_PATH, SPLASH_BG, SPLASH_FG
 from receipt_printing import print_committed_receipt
 from utils import format_currency
@@ -21,13 +22,13 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
-class ReprintWindow(tk.Toplevel):
+class ReprintWindow(WorkspacePage):
     """Search receipt history and generate a reason-backed duplicate receipt."""
 
     @auth.require_permission("reprint_receipts")
-    def __init__(self, master=None):
+    def __init__(self, master=None, *, embedded: bool = False):
         """Create the receipt search and reprint interface."""
-        super().__init__(master)
+        super().__init__(master, embedded=embedded)
         self.title("Receipt Reprint")
         self.geometry("900x600")
         self.configure(bg=SPLASH_BG)

@@ -6,6 +6,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 import auth
+from ui_workspace import WorkspacePage
 from config import SPLASH_BG, SPLASH_FG
 from ledger import active_academic_year, ensure_student_charges
 from money import OverpaymentError, max_payment_amount, validate_payment_amount
@@ -14,13 +15,13 @@ from ui_collection_common import connect_db, require_session, search_students
 from financial_operations import record_advance_payment
 
 
-class AdvancePaymentWindow(tk.Toplevel):
+class AdvancePaymentWindow(WorkspacePage):
     """Collect advance payment as an immutable credit payment row."""
 
     @auth.require_permission("collect_advance_payments")
-    def __init__(self, master=None):
+    def __init__(self, master=None, *, embedded: bool = False):
         """Create the advance-payment window."""
-        super().__init__(master)
+        super().__init__(master, embedded=embedded)
         self.title("Advance Payment")
         self.geometry("760x520")
         self.configure(bg=SPLASH_BG)

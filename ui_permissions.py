@@ -6,18 +6,19 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 import auth
+from ui_workspace import WorkspacePage
 from config import SPLASH_BG, SPLASH_FG
 from permissions import DEFAULT_ACCOUNTANT_PERMISSIONS, PERMISSIONS
 from ui_master_utils import audit, connect_db
 from utils import now_str
 
 
-class AccountantPermissionsWindow(tk.Toplevel):
+class AccountantPermissionsWindow(WorkspacePage):
     """Allow administrators to grant or revoke delegable accountant capabilities."""
 
     @auth.require_role("ADMIN")
-    def __init__(self, master=None):
-        super().__init__(master)
+    def __init__(self, master=None, *, embedded: bool = False):
+        super().__init__(master, embedded=embedded)
         self.title("Accountant Permissions")
         self.geometry("760x720")
         self.configure(bg=SPLASH_BG)

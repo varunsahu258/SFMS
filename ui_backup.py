@@ -10,6 +10,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 
 
 import auth
+from ui_workspace import WorkspacePage
 import backup
 from config import DB_PATH, SPLASH_BG, SPLASH_FG
 from gdrive import DRIVE_SCOPES, upload_to_drive
@@ -42,13 +43,13 @@ def _format_size(size: int) -> str:
     return f"{size / (1024 * 1024):,.2f} MB"
 
 
-class BackupWindow(tk.Toplevel):
+class BackupWindow(WorkspacePage):
     """Manage local, encrypted, scheduled, Drive, restore, and archive backups."""
 
     @auth.require_role("ADMIN")
-    def __init__(self, master=None):
+    def __init__(self, master=None, *, embedded: bool = False):
         """Create all administrator backup-management sections."""
-        super().__init__(master)
+        super().__init__(master, embedded=embedded)
         self.title("Backup and Database Management")
         self.geometry("980x700")
         self.configure(bg=SPLASH_BG)

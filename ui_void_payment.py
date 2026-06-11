@@ -8,6 +8,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 import auth
+from ui_workspace import WorkspacePage
 from audit import log_financial_action
 from config import DB_PATH, SPLASH_BG, SPLASH_FG
 from ledger import allocate_payment
@@ -104,13 +105,13 @@ def create_void_receipt(
     return void_receipt_no
 
 
-class VoidPaymentWindow(tk.Toplevel):
+class VoidPaymentWindow(WorkspacePage):
     """Create reversal rows without modifying immutable original payments."""
 
     @auth.require_permission("void_payments")
-    def __init__(self, master=None):
+    def __init__(self, master=None, *, embedded: bool = False):
         """Create the receipt search and payment-void interface."""
-        super().__init__(master)
+        super().__init__(master, embedded=embedded)
         self.title("Void Payment")
         self.geometry("980x610")
         self.configure(bg=SPLASH_BG)

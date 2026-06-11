@@ -9,6 +9,7 @@ from datetime import datetime
 from tkinter import messagebox, ttk
 
 import auth
+from ui_workspace import WorkspacePage
 from config import DB_PATH, SPLASH_BG, SPLASH_FG
 from report_generator import audit_export
 
@@ -36,13 +37,13 @@ def _parse_date(value: str) -> datetime | None:
     raise ValueError("Dates must use DD-MM-YYYY format.")
 
 
-class AuditLogWindow(tk.Toplevel):
+class AuditLogWindow(WorkspacePage):
     """Filter, inspect, and export immutable audit-log records."""
 
     @auth.require_permission("view_audit_log")
-    def __init__(self, master=None):
+    def __init__(self, master=None, *, embedded: bool = False):
         """Create the administrator-only audit viewer."""
-        super().__init__(master)
+        super().__init__(master, embedded=embedded)
         self.title("Audit Log")
         self.geometry("1220x650")
         self.configure(bg=SPLASH_BG)

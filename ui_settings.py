@@ -15,6 +15,7 @@ from openpyxl.workbook.protection import WorkbookProtection
 from PIL import Image, ImageTk
 
 import auth
+from ui_workspace import WorkspacePage
 import backup
 from audit import log_operational_event
 from config import DB_PATH, REPORTS_DIR
@@ -108,12 +109,12 @@ def export_full_database_to_excel(exported_by=None, export_password: str | None 
     return str(path)
 
 
-class SettingsWindow(tk.Toplevel):
+class SettingsWindow(WorkspacePage):
     """Edit school, appearance, security, backup, and data settings."""
 
     @auth.require_role("ADMIN")
-    def __init__(self, master=None):
-        super().__init__(master)
+    def __init__(self, master=None, *, embedded: bool = False):
+        super().__init__(master, embedded=embedded)
         self.title("SFMS Settings")
         self.geometry("820x650")
         self.transient(master)

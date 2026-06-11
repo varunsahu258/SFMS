@@ -6,17 +6,18 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 import auth
+from ui_workspace import WorkspacePage
 from config import SPLASH_BG, SPLASH_FG
 from ui_master_utils import audit, connect_db, ensure_permission_write
 from utils import now_str
 
 
-class ClassSectionWindow(tk.Toplevel):
+class ClassSectionWindow(WorkspacePage):
     """Manage class and section values as an administrator or accountant."""
 
     @auth.require_permission("manage_classes")
-    def __init__(self, master=None):
-        super().__init__(master)
+    def __init__(self, master=None, *, embedded: bool = False):
+        super().__init__(master, embedded=embedded)
         self.title("Classes and Sections")
         self.geometry("760x520")
         self.configure(bg=SPLASH_BG)

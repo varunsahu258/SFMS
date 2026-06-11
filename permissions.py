@@ -34,6 +34,9 @@ PERMISSIONS: tuple[PermissionDefinition, ...] = (
     PermissionDefinition("void_payments", "Void payments using audited reversal entries", "Sensitive Financial Actions"),
     PermissionDefinition("manage_cheques", "Clear, bounce, or cancel cheques", "Sensitive Financial Actions"),
     PermissionDefinition("view_audit_log", "View the audit log", "Audit"),
+    PermissionDefinition("manage_timetable", "Manage teachers, subjects, timetable setup", "Timetable"),
+    PermissionDefinition("generate_timetable", "Generate and publish timetables", "Timetable"),
+    PermissionDefinition("view_timetable", "View and print timetables", "Timetable", True),
 )
 
 PERMISSION_KEYS = frozenset(item.key for item in PERMISSIONS)

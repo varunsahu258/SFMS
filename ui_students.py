@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import auth
+from ui_workspace import WorkspacePage
 from config import SPLASH_BG, SPLASH_FG, STATUS_ACTIVE
 from ledger import active_academic_year, charge_rows
 from ledger_service import LedgerService
@@ -111,13 +112,13 @@ def reactivate_student(conn: sqlite3.Connection, student_id: int, reason: str) -
     audit(conn, "STUDENT_REACTIVATE", "students", student_id, old, {"status": "ACTIVE", "is_active": 1, "reason": reason})
 
 
-class StudentWindow(tk.Toplevel):
+class StudentWindow(WorkspacePage):
     """Manage non-financial student records as an administrator or accountant."""
 
     @auth.require_permission("manage_students")
-    def __init__(self, master=None):
+    def __init__(self, master=None, *, embedded: bool = False):
         """Create the student management window."""
-        super().__init__(master)
+        super().__init__(master, embedded=embedded)
         self.title("Students")
         self.geometry("1240x620")
         self.configure(bg=SPLASH_BG)

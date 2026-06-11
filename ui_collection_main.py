@@ -54,19 +54,15 @@ def main_collection_summary(conn, student_id: int) -> dict:
 class CollectionMainWindow(CollectionBaseWindow):
     """Collect one amount and record it under Tuition Fee while reducing overall dues."""
 
-    @auth.require_permission("collect_main_fees")
-    def __init__(self, master=None):
-        super().__init__(master)
-
     register_types = ("BIG", "BOTH")
     receipt_type = "BIG"
 
     @auth.require_permission("collect_main_fees")
-    def __init__(self, master=None):
+    def __init__(self, master=None, *, embedded: bool = False):
         self.main_summary: dict = {}
         self.main_amount_var = None
         self.main_mode_var = None
-        super().__init__(master)
+        super().__init__(master, embedded=embedded)
 
     def load_dues(self) -> None:
         """Show one overall balance instead of pre-filling every fee head."""

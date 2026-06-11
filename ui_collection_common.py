@@ -9,6 +9,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 import auth
+from ui_workspace import WorkspacePage
 from config import DB_PATH, SPLASH_BG, SPLASH_FG
 from ledger import active_academic_year, charge_rows
 from money import OverpaymentError, max_payment_amount, validate_payment_amount
@@ -156,7 +157,7 @@ class UPIDetailDialog(tk.Toplevel):
         self.destroy()
 
 
-class CollectionBaseWindow(tk.Toplevel):
+class CollectionBaseWindow(WorkspacePage):
     """Base window for BIG/SMALL/exemption fee collection flows."""
 
     register_types: tuple[str, ...] = ("BIG", "BOTH")
@@ -164,9 +165,9 @@ class CollectionBaseWindow(tk.Toplevel):
     max_rows: int | None = None
     force_exemption_view = False
 
-    def __init__(self, master=None):
+    def __init__(self, master=None, *, embedded: bool = False):
         """Create the shared fee collection screen."""
-        super().__init__(master)
+        super().__init__(master, embedded=embedded)
         self.title(f"{self.receipt_type} Fee Collection")
         self.geometry("1040x640")
         self.configure(bg=SPLASH_BG)

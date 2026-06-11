@@ -10,6 +10,7 @@ from datetime import datetime
 from tkinter import messagebox, ttk
 
 import auth
+from ui_workspace import WorkspacePage
 from config import DB_PATH, REPORTS_DIR, SPLASH_BG, SPLASH_FG
 from report_generator import (
     audit_export,
@@ -43,13 +44,13 @@ def _open_pdf(path: str) -> None:
         os.startfile(path)
 
 
-class ReportsWindow(tk.Toplevel):
+class ReportsWindow(WorkspacePage):
     """Display all SFMS PDF reports in a tabbed window."""
 
     @auth.require_permission("view_reports")
-    def __init__(self, master=None):
+    def __init__(self, master=None, *, embedded: bool = False):
         """Create report tabs and load dropdown values."""
-        super().__init__(master)
+        super().__init__(master, embedded=embedded)
         self.title("SFMS Reports")
         self.geometry("1180x580")
         self.configure(bg=SPLASH_BG)
