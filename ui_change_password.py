@@ -9,6 +9,7 @@ from tkinter import messagebox, ttk
 import bcrypt
 
 import auth
+from ui_workspace import WorkspacePage
 from audit import log_action
 from config import APP_TITLE, DB_PATH, SPLASH_BG, SPLASH_FG
 
@@ -19,12 +20,12 @@ PASSWORD_MASK = "*"
 MIN_PASSWORD_LENGTH = 8
 
 
-class ChangePasswordWindow(tk.Toplevel):
+class ChangePasswordWindow(WorkspacePage):
     """Tkinter window that lets the current user change their password."""
 
-    def __init__(self, master=None):
+    def __init__(self, master=None, *, embedded: bool = False):
         """Create and display the change-password form."""
-        super().__init__(master)
+        super().__init__(master, embedded=embedded)
         self.current_password_var = tk.StringVar()
         self.new_password_var = tk.StringVar()
         self.confirm_password_var = tk.StringVar()

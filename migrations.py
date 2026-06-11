@@ -6,9 +6,9 @@ import sqlite3
 from collections.abc import Callable
 
 from config import (
-    BACKUP_INTERVAL_DEFAULT, LOGO_PATH, SCHOOL_ADDRESS, SCHOOL_NAME,
+    BACKUP_INTERVAL_DEFAULT, LOGO_PATH, RECEIPT_ISSUER_NAME, SCHOOL_ADDRESS, SCHOOL_NAME,
     SESSION_TIMEOUT_DEFAULT, SETTING_BACKUP_INTERVAL_HOURS, SETTING_LOGO_PATH,
-    SETTING_SCHOOL_ADDRESS, SETTING_SCHOOL_NAME, SETTING_SESSION_TIMEOUT_MINUTES,
+    SETTING_RECEIPT_ISSUER_NAME, SETTING_SCHOOL_ADDRESS, SETTING_SCHOOL_NAME, SETTING_SESSION_TIMEOUT_MINUTES,
 )
 from utils import now_str
 
@@ -239,6 +239,262 @@ def migration_v008_receipt_sequence(conn: sqlite3.Connection) -> None:
     ensure_receipt_sequence(conn)
 
 
+def migration_v009_class_section_and_student_details(conn: sqlite3.Connection) -> None:
+    """Add class/section masters and the complete student admission profile."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS classes(
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS sections(
+            id INTEGER PRIMARY KEY,
+            class_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT,
+            UNIQUE(class_id,name),
+            FOREIGN KEY(class_id) REFERENCES classes(id)
+        );
+        """
+    )
+    student_columns = {row[1] for row in conn.execute("PRAGMA table_info(students)")}
+    additions = {
+        "scholar_no": "TEXT",
+        "ekyc_status": "TEXT DEFAULT 'PENDING'",
+        "serial_no": "TEXT",
+        "father_name": "TEXT",
+        "mother_name": "TEXT",
+        "address": "TEXT",
+        "dob": "TEXT",
+        "admission_date": "TEXT",
+        "mobile2": "TEXT",
+        "sssm_id": "TEXT",
+        "gender": "TEXT",
+        "category": "TEXT",
+    }
+    for name, definition in additions.items():
+        if name not in student_columns:
+            conn.execute(f"ALTER TABLE students ADD COLUMN {name} {definition}")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_students_scholar_no ON students(scholar_no) WHERE scholar_no IS NOT NULL AND scholar_no<>''")
+    conn.execute("UPDATE students SET father_name=guardian_name WHERE COALESCE(father_name,'')='' AND COALESCE(guardian_name,'')<>''")
+    conn.execute(
+        "INSERT OR IGNORE INTO classes(name,created_at) "
+        "SELECT DISTINCT class,? FROM students WHERE class IS NOT NULL AND TRIM(class)<>''",
+        (now_str(),),
+    )
+    conn.execute(
+        """INSERT OR IGNORE INTO sections(class_id,name,created_at)
+           SELECT c.id,s.section,? FROM students s JOIN classes c ON c.name=s.class
+           WHERE s.section IS NOT NULL AND TRIM(s.section)<>''""",
+        (now_str(),),
+    )
+
+
+def migration_v010_accountant_permissions(conn: sqlite3.Connection) -> None:
+    """Create per-accountant permission overrides managed by administrators."""
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS user_permissions(
+               user_id INTEGER NOT NULL,
+               permission_key TEXT NOT NULL,
+               allowed INTEGER NOT NULL CHECK(allowed IN (0,1)),
+               updated_at TEXT NOT NULL,
+               updated_by INTEGER,
+               PRIMARY KEY(user_id, permission_key),
+               FOREIGN KEY(user_id) REFERENCES users(id),
+               FOREIGN KEY(updated_by) REFERENCES users(id)
+           )"""
+    )
+
+
+def migration_v011_receipt_issuer_setting(conn: sqlite3.Connection) -> None:
+    """Add the configurable name printed beneath the receipt signature line."""
+    _setting(conn, SETTING_RECEIPT_ISSUER_NAME, RECEIPT_ISSUER_NAME)
+
+
+
+def migration_v012_timetable(conn: sqlite3.Connection) -> None:
+    """Create automatic timetable setup, version, and schedule tables."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS tt_subjects(
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            code TEXT NOT NULL UNIQUE,
+            is_lab INTEGER NOT NULL DEFAULT 0 CHECK(is_lab IN (0,1)),
+            is_active INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0,1)),
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS tt_teachers(
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            phone TEXT,
+            max_periods_day INTEGER NOT NULL DEFAULT 6 CHECK(max_periods_day > 0),
+            is_active INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0,1)),
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS tt_teacher_availability(
+            teacher_id INTEGER NOT NULL,
+            day TEXT NOT NULL CHECK(day IN ('MON','TUE','WED','THU','FRI','SAT')),
+            arrives TEXT NOT NULL,
+            departs TEXT NOT NULL,
+            PRIMARY KEY(teacher_id,day),
+            FOREIGN KEY(teacher_id) REFERENCES tt_teachers(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS tt_teacher_constraints(
+            teacher_id INTEGER NOT NULL,
+            day TEXT NOT NULL CHECK(day IN ('MON','TUE','WED','THU','FRI','SAT')),
+            period_no INTEGER NOT NULL CHECK(period_no > 0),
+            ctype TEXT NOT NULL CHECK(ctype IN ('UNAVAILABLE','PREFERRED_FREE','PREFERRED_TEACH')),
+            PRIMARY KEY(teacher_id,day,period_no),
+            FOREIGN KEY(teacher_id) REFERENCES tt_teachers(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS tt_assignments(
+            teacher_id INTEGER NOT NULL,
+            subject_id INTEGER NOT NULL,
+            class_name TEXT NOT NULL,
+            PRIMARY KEY(teacher_id,subject_id,class_name),
+            FOREIGN KEY(teacher_id) REFERENCES tt_teachers(id) ON DELETE CASCADE,
+            FOREIGN KEY(subject_id) REFERENCES tt_subjects(id) ON DELETE CASCADE,
+            FOREIGN KEY(class_name) REFERENCES classes(name)
+        );
+        CREATE TABLE IF NOT EXISTS tt_subject_requirements(
+            subject_id INTEGER NOT NULL,
+            class_name TEXT NOT NULL,
+            periods_per_week INTEGER NOT NULL CHECK(periods_per_week >= 0),
+            double_period_allowed INTEGER NOT NULL DEFAULT 0 CHECK(double_period_allowed IN (0,1)),
+            PRIMARY KEY(subject_id,class_name),
+            FOREIGN KEY(subject_id) REFERENCES tt_subjects(id) ON DELETE CASCADE,
+            FOREIGN KEY(class_name) REFERENCES classes(name)
+        );
+        CREATE TABLE IF NOT EXISTS tt_schedule_config(
+            id INTEGER PRIMARY KEY CHECK(id=1),
+            periods_per_day INTEGER NOT NULL CHECK(periods_per_day > 0),
+            working_days TEXT NOT NULL,
+            period_duration_min INTEGER NOT NULL CHECK(period_duration_min > 0),
+            day_start_time TEXT NOT NULL,
+            break_after_period INTEGER,
+            break_duration_min INTEGER NOT NULL DEFAULT 0 CHECK(break_duration_min >= 0),
+            lunch_after_period INTEGER,
+            lunch_duration_min INTEGER NOT NULL DEFAULT 0 CHECK(lunch_duration_min >= 0)
+        );
+        CREATE TABLE IF NOT EXISTS tt_versions(
+            id INTEGER PRIMARY KEY,
+            label TEXT NOT NULL,
+            academic_year TEXT NOT NULL,
+            generated_at TEXT NOT NULL,
+            generated_by INTEGER,
+            is_published INTEGER NOT NULL DEFAULT 0 CHECK(is_published IN (0,1)),
+            FOREIGN KEY(generated_by) REFERENCES users(id)
+        );
+        CREATE TABLE IF NOT EXISTS tt_timetable(
+            version_id INTEGER NOT NULL,
+            class_name TEXT NOT NULL,
+            day TEXT NOT NULL CHECK(day IN ('MON','TUE','WED','THU','FRI','SAT')),
+            period_no INTEGER NOT NULL CHECK(period_no > 0),
+            subject_id INTEGER,
+            teacher_id INTEGER,
+            is_free INTEGER NOT NULL DEFAULT 0 CHECK(is_free IN (0,1)),
+            is_locked INTEGER NOT NULL DEFAULT 0 CHECK(is_locked IN (0,1)),
+            PRIMARY KEY(version_id,class_name,day,period_no),
+            FOREIGN KEY(version_id) REFERENCES tt_versions(id) ON DELETE CASCADE,
+            FOREIGN KEY(class_name) REFERENCES classes(name),
+            FOREIGN KEY(subject_id) REFERENCES tt_subjects(id),
+            FOREIGN KEY(teacher_id) REFERENCES tt_teachers(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_tt_timetable_teacher
+            ON tt_timetable(version_id,teacher_id,day,period_no);
+        INSERT OR IGNORE INTO tt_schedule_config(
+            id,periods_per_day,working_days,period_duration_min,day_start_time,
+            break_after_period,break_duration_min,lunch_after_period,lunch_duration_min
+        ) VALUES(1,8,'MON,TUE,WED,THU,FRI,SAT',40,'08:00',2,10,5,30);
+        """
+    )
+
+
+def migration_v013_late_fees(conn: sqlite3.Connection) -> None:
+    """Add audited, one-row-per-assessment late-fee records."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS late_fee_assessments(
+            id INTEGER PRIMARY KEY,
+            student_id INTEGER NOT NULL,
+            charge_id INTEGER NOT NULL UNIQUE,
+            amount REAL NOT NULL CHECK(amount > 0),
+            due_date TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            assessed_at TEXT NOT NULL,
+            assessed_by INTEGER,
+            FOREIGN KEY(student_id) REFERENCES students(id),
+            FOREIGN KEY(charge_id) REFERENCES student_charges(id),
+            FOREIGN KEY(assessed_by) REFERENCES users(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_late_fees_student ON late_fee_assessments(student_id,assessed_at);
+        """
+    )
+
+
+def migration_v014_admissions(conn: sqlite3.Connection) -> None:
+    """Track new admissions and keep admission-only heads out of class structures."""
+    fee_head_columns = {row[1] for row in conn.execute("PRAGMA table_info(fee_heads)")}
+    if "is_one_time" not in fee_head_columns:
+        conn.execute("ALTER TABLE fee_heads ADD COLUMN is_one_time INTEGER NOT NULL DEFAULT 0")
+    conn.execute(
+        "UPDATE fee_heads SET is_one_time=1 WHERE LOWER(TRIM(name)) LIKE 'admission fee%'"
+    )
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS admissions(
+            id INTEGER PRIMARY KEY,
+            student_id INTEGER NOT NULL UNIQUE,
+            charge_id INTEGER,
+            admission_fee REAL NOT NULL DEFAULT 0 CHECK(admission_fee >= 0),
+            register_type TEXT NOT NULL DEFAULT 'BIG' CHECK(register_type IN ('BIG','SMALL')),
+            admitted_at TEXT NOT NULL,
+            admitted_by INTEGER,
+            FOREIGN KEY(student_id) REFERENCES students(id),
+            FOREIGN KEY(charge_id) REFERENCES student_charges(id),
+            FOREIGN KEY(admitted_by) REFERENCES users(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_admissions_date ON admissions(admitted_at);
+        """
+    )
+
+
+def migration_v015_installment_schedules(conn: sqlite3.Connection) -> None:
+    """Add configurable 48/26/26 installment due dates by class and year."""
+    late_fee_columns = {row[1] for row in conn.execute("PRAGMA table_info(late_fee_assessments)")}
+    if "academic_year" not in late_fee_columns:
+        conn.execute("ALTER TABLE late_fee_assessments ADD COLUMN academic_year TEXT")
+    if "installment_no" not in late_fee_columns:
+        conn.execute("ALTER TABLE late_fee_assessments ADD COLUMN installment_no INTEGER")
+    if "register_type" not in late_fee_columns:
+        conn.execute("ALTER TABLE late_fee_assessments ADD COLUMN register_type TEXT")
+    conn.executescript(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_late_fee_once_per_installment
+            ON late_fee_assessments(student_id,academic_year,installment_no,register_type)
+            WHERE installment_no IS NOT NULL;
+        CREATE TABLE IF NOT EXISTS installment_schedules(
+            id INTEGER PRIMARY KEY,
+            academic_year TEXT NOT NULL,
+            class_name TEXT NOT NULL,
+            installment_1_due TEXT NOT NULL,
+            installment_2_due TEXT NOT NULL,
+            installment_3_due TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            updated_by INTEGER,
+            UNIQUE(academic_year,class_name),
+            FOREIGN KEY(updated_by) REFERENCES users(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_installment_schedule_year_class
+            ON installment_schedules(academic_year,class_name);
+        """
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     ("v001_base_settings", migration_v001_base_settings),
     ("v002_setup_defaults", migration_v002_setup_defaults),
@@ -248,6 +504,13 @@ MIGRATIONS: tuple[Migration, ...] = (
     ("v006_advance_and_backup_keys", migration_v006_advance_and_backup_keys),
     ("v007_remove_oauth_token_setting", migration_v007_remove_oauth_token_setting),
     ("v008_receipt_sequence", migration_v008_receipt_sequence),
+    ("v009_class_section_and_student_details", migration_v009_class_section_and_student_details),
+    ("v010_accountant_permissions", migration_v010_accountant_permissions),
+    ("v011_receipt_issuer_setting", migration_v011_receipt_issuer_setting),
+    ("v012_timetable", migration_v012_timetable),
+    ("v013_late_fees", migration_v013_late_fees),
+    ("v014_admissions", migration_v014_admissions),
+    ("v015_installment_schedules", migration_v015_installment_schedules),
 )
 
 
