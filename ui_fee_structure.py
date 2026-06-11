@@ -6,17 +6,18 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 import auth
+from ui_workspace import WorkspacePage
 from config import SPLASH_BG, SPLASH_FG
 from ledger import ensure_student_charges
-from ui_master_utils import audit, connect_db, ensure_admin_write
+from ui_master_utils import audit, connect_db, ensure_permission_write
 
 
-class FeeStructureWindow(tk.Toplevel):
+class FeeStructureWindow(WorkspacePage):
     """Window for editing fee amounts and due dates by academic year and class."""
 
-    def __init__(self, master=None):
+    def __init__(self, master=None, *, embedded: bool = False):
         """Create the fee-structure window."""
-        super().__init__(master)
+        super().__init__(master, embedded=embedded)
         self.title("Fee Structure")
         self.geometry("820x520")
         self.configure(bg=SPLASH_BG)
@@ -127,10 +128,10 @@ class FeeStructureWindow(tk.Toplevel):
                 self.amount_vars[row["fee_head_id"]].set(f"{amount:.2f}")
                 self.due_vars[row["fee_head_id"]].set(row["due_date"] or "")
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("manage_fee_structure")
     def save(self) -> None:
         """Update or insert all edited fee-structure rows."""
-        if not ensure_admin_write():
+        if not ensure_permission_write("manage_fee_structure"):
             return
         academic_year = self.year_var.get()
         class_name = self.class_var.get()

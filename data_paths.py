@@ -25,6 +25,21 @@ def get_app_data_dir(system: str | None = None) -> Path:
     return path.resolve()
 
 
+def get_app_config_dir(system: str | None = None) -> Path:
+    """Return and create the user-specific configuration directory."""
+    system = system or platform.system()
+    if system == "Windows":
+        root = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+        path = root / "SFMS"
+    elif system == "Darwin":
+        path = Path.home() / "Library" / "Preferences" / "SFMS"
+    else:
+        root = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+        path = root / "SFMS"
+    path.mkdir(parents=True, exist_ok=True)
+    return path.resolve()
+
+
 def apply_restrictive_acl(path: Path, account: str | None = None) -> None:
     """On Windows, remove inheritance and grant access only to SYSTEM/account."""
     if platform.system() != "Windows":

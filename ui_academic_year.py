@@ -6,17 +6,18 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 import auth
+from ui_workspace import WorkspacePage
 from config import SPLASH_BG, SPLASH_FG
 from ledger import ensure_student_charges
-from ui_master_utils import audit, connect_db, ensure_admin_write
+from ui_master_utils import audit, connect_db, ensure_permission_write
 
 
-class AcademicYearWindow(tk.Toplevel):
+class AcademicYearWindow(WorkspacePage):
     """Window for adding, activating, and safely deleting academic years."""
 
-    def __init__(self, master=None):
+    def __init__(self, master=None, *, embedded: bool = False):
         """Create the academic-year management window."""
-        super().__init__(master)
+        super().__init__(master, embedded=embedded)
         self.title("Academic Years")
         self.geometry("640x430")
         self.configure(bg=SPLASH_BG)
@@ -63,10 +64,10 @@ class AcademicYearWindow(tk.Toplevel):
             return None
         return int(selected[0])
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("manage_academic_years")
     def add_year(self) -> None:
         """Insert a new academic year."""
-        if not ensure_admin_write():
+        if not ensure_permission_write("manage_academic_years"):
             return
         label = self.label_var.get().strip()
         start = self.start_var.get().strip()
@@ -82,11 +83,11 @@ class AcademicYearWindow(tk.Toplevel):
             audit(conn, "ACADEMIC_YEAR_ADD", "academic_years", cursor.lastrowid, None, {"label": label, "start_date": start, "end_date": end})
         self.refresh()
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("manage_academic_years")
     def set_active(self) -> None:
         """Set the selected academic year active and all others inactive."""
         year_id = self._selected_id()
-        if year_id is None or not ensure_admin_write():
+        if year_id is None or not ensure_permission_write("manage_academic_years"):
             return
         with connect_db() as conn:
             old_rows = [dict(row) for row in conn.execute("SELECT id, label, is_active FROM academic_years")]
@@ -98,11 +99,11 @@ class AcademicYearWindow(tk.Toplevel):
             audit(conn, "ACADEMIC_YEAR_SET_ACTIVE", "academic_years", year_id, old_rows, {"active_id": year_id})
         self.refresh()
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("manage_academic_years")
     def delete_year(self) -> None:
         """Delete a year only when no payment rows use it."""
         year_id = self._selected_id()
-        if year_id is None or not ensure_admin_write():
+        if year_id is None or not ensure_permission_write("manage_academic_years"):
             return
         with connect_db() as conn:
             year = conn.execute("SELECT label FROM academic_years WHERE id = ?", (year_id,)).fetchone()

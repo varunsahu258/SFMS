@@ -26,16 +26,22 @@ def record_collection(conn, student_id: int, receipt_type: str, user_id: int,
                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'REGULAR',
                           (SELECT id FROM academic_years WHERE label=?),?)""",
                 (student_id, receipt_no, item["fee_head_id"], str(item["amount_due"]),
-                 str(item["amount_paying"]), 0, payment_date, user_id, item["mode"],
-                 item.get("note", ""), "",
+                 str(item["amount_paying"]), str(item.get("balance_after", 0)),
+                 payment_date, user_id, item["mode"], item.get("note", ""), "",
                  item.get("cheque_no") if item["mode"] == "CHEQUE" else None,
-                 item.get("note") if item["mode"] == "UPI" else None,
+                 (item.get("upi_reference") or item.get("note")) if item["mode"] == "UPI" else None,
                  "PENDING" if item["mode"] == "CHEQUE" else None,
                  item["academic_year"], item.get("due_date")),
             )
             payment_ids.append(cursor.lastrowid)
-            allocate_payment(conn, cursor.lastrowid, item["charge_id"],
-                             str(item["amount_paying"]), "PAYMENT")
+            allocations = item.get("allocations") or [{
+                "charge_id": item["charge_id"], "amount": item["amount_paying"]
+            }]
+            for allocation in allocations:
+                allocate_payment(
+                    conn, cursor.lastrowid, allocation["charge_id"],
+                    str(allocation["amount"]), "PAYMENT",
+                )
             if item["mode"] == "CHEQUE":
                 conn.execute(
                     """INSERT INTO cheque_tracker(payment_id,cheque_no,bank,amount,

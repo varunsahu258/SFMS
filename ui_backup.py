@@ -10,6 +10,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 
 
 import auth
+from ui_workspace import WorkspacePage
 import backup
 from config import DB_PATH, SPLASH_BG, SPLASH_FG
 from gdrive import DRIVE_SCOPES, upload_to_drive
@@ -42,13 +43,13 @@ def _format_size(size: int) -> str:
     return f"{size / (1024 * 1024):,.2f} MB"
 
 
-class BackupWindow(tk.Toplevel):
+class BackupWindow(WorkspacePage):
     """Manage local, encrypted, scheduled, Drive, restore, and archive backups."""
 
     @auth.require_role("ADMIN")
-    def __init__(self, master=None):
+    def __init__(self, master=None, *, embedded: bool = False):
         """Create all administrator backup-management sections."""
-        super().__init__(master)
+        super().__init__(master, embedded=embedded)
         self.title("Backup and Database Management")
         self.geometry("980x700")
         self.configure(bg=SPLASH_BG)
@@ -96,7 +97,8 @@ class BackupWindow(tk.Toplevel):
         ttk.Button(frame, text="Set Master Password", command=self.set_master_password).pack(anchor="w", pady=6)
         tk.Label(
             frame,
-            text="The password wraps a random encryption key and is never stored. Losing it makes backups unrecoverable.",
+            text=("Encrypted backups include the database and receipt-integrity key for full machine recovery. "
+                  "Keep the backup password safe and upload backups off this computer; losing both makes recovery impossible."),
             bg=SPLASH_BG,
             fg=SPLASH_FG,
             wraplength=720,
@@ -217,7 +219,11 @@ class BackupWindow(tk.Toplevel):
         except ValueError as exc:
             messagebox.showerror("Backup Password", str(exc), parent=self)
             return
-        messagebox.showinfo("Backup Password", "Backup password saved; existing backups remain readable.", parent=self)
+        messagebox.showinfo(
+            "Backup Password",
+            "Backup password saved. New recovery backups use this password; keep previous passwords for older off-site backups.",
+            parent=self,
+        )
 
     def save_schedule(self) -> None:
         with _connect() as conn:

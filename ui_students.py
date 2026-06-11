@@ -10,11 +10,12 @@ from datetime import datetime, timedelta
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import auth
+from ui_workspace import WorkspacePage
 from config import SPLASH_BG, SPLASH_FG, STATUS_ACTIVE
 from ledger import active_academic_year, charge_rows
 from ledger_service import LedgerService
 from security_utils import display_aadhaar
-from ui_master_utils import audit, connect_db, ensure_admin_write
+from ui_master_utils import audit, connect_db, ensure_permission_write
 from utils import format_currency, now_str
 
 CLASS_MAP = {
@@ -111,13 +112,13 @@ def reactivate_student(conn: sqlite3.Connection, student_id: int, reason: str) -
     audit(conn, "STUDENT_REACTIVATE", "students", student_id, old, {"status": "ACTIVE", "is_active": 1, "reason": reason})
 
 
-class StudentWindow(tk.Toplevel):
-    """Admin-only student management window."""
+class StudentWindow(WorkspacePage):
+    """Manage non-financial student records as an administrator or accountant."""
 
-    @auth.require_role("ADMIN")
-    def __init__(self, master=None):
+    @auth.require_permission("manage_students")
+    def __init__(self, master=None, *, embedded: bool = False):
         """Create the student management window."""
-        super().__init__(master)
+        super().__init__(master, embedded=embedded)
         self.title("Students")
         self.geometry("1240x620")
         self.configure(bg=SPLASH_BG)
@@ -131,11 +132,11 @@ class StudentWindow(tk.Toplevel):
         with connect_db() as conn:
             existing = {row["name"] for row in conn.execute("PRAGMA table_info(students)")}
             for column, ddl in {
-                "dob": "TEXT",
-                "gender": "TEXT",
-                "category": "TEXT",
-                "route": "TEXT",
-                "vehicle_fee": "REAL DEFAULT 0",
+                "scholar_no": "TEXT", "ekyc_status": "TEXT DEFAULT 'PENDING'",
+                "serial_no": "TEXT", "father_name": "TEXT", "mother_name": "TEXT",
+                "address": "TEXT", "dob": "TEXT", "admission_date": "TEXT",
+                "mobile2": "TEXT", "sssm_id": "TEXT", "gender": "TEXT",
+                "category": "TEXT", "route": "TEXT", "vehicle_fee": "REAL DEFAULT 0",
                 "has_vehicle_fee": "INTEGER DEFAULT 0",
             }.items():
                 if column not in existing:
@@ -158,11 +159,11 @@ class StudentWindow(tk.Toplevel):
         self.notebook.add(active_tab, text="Students")
         self.notebook.add(archive_tab, text="Archived Students")
 
-        columns = ("id", "name", "class", "section", "phone", "status")
+        columns = ("scholar_no", "name", "class", "section", "phone", "ekyc", "status")
         self.tree = ttk.Treeview(active_tab, columns=columns, show="headings", selectmode="extended")
         for column, heading, width in (
-            ("id", "ID", 60), ("name", "Name", 250), ("class", "Class", 120),
-            ("section", "Section", 90), ("phone", "Phone", 120), ("status", "Status", 100),
+            ("scholar_no", "Scholar No", 100), ("name", "Student Name", 220), ("class", "Class", 110),
+            ("section", "Section", 80), ("phone", "Mobile 1", 110), ("ekyc", "eKYC", 90), ("status", "Status", 90),
         ):
             self.tree.heading(column, text=heading)
             self.tree.column(column, width=width)
@@ -203,7 +204,7 @@ class StudentWindow(tk.Toplevel):
         enabled = False
         if len(selected) == 1:
             values = self.tree.item(selected[0], "values")
-            enabled = bool(values and values[5] == "ACTIVE")
+            enabled = bool(values and values[6] == "ACTIVE")
         self.tc_button.configure(state="normal" if enabled else "disabled")
 
     def _clear_search(self) -> None:
@@ -222,7 +223,7 @@ class StudentWindow(tk.Toplevel):
         with connect_db() as conn:
             active_rows = conn.execute(
                 """
-                SELECT id, name, class, section, phone,
+                SELECT id, scholar_no, name, class, section, phone, ekyc_status,
                        CASE WHEN is_active = 1 THEN status ELSE 'INACTIVE' END AS status
                 FROM students
                 WHERE status <> 'LEFT' AND (name LIKE ? OR class LIKE ? OR aadhaar LIKE ?)
@@ -251,7 +252,10 @@ class StudentWindow(tk.Toplevel):
                 (term, term, term),
             ).fetchall()
         for row in active_rows:
-            self.tree.insert("", "end", iid=str(row["id"]), values=tuple(row))
+            self.tree.insert("", "end", iid=str(row["id"]), values=(
+                row["scholar_no"], row["name"], row["class"], row["section"],
+                row["phone"], row["ekyc_status"], row["status"],
+            ))
         for row in archived_rows:
             self.archived_tree.insert(
                 "", "end", iid=str(row["id"]),
@@ -266,23 +270,23 @@ class StudentWindow(tk.Toplevel):
             return None
         return int(selected[0])
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("manage_students")
     def add_student(self) -> None:
         """Open the add-student dialog."""
         AddStudentDialog(self, on_saved=self.refresh)
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("manage_students")
     def edit_selected(self) -> None:
         """Open the edit dialog for the selected student."""
         student_id = self._selected_id()
         if student_id is not None:
             EditStudentDialog(self, student_id, on_saved=self.refresh)
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("manage_students")
     def deactivate_selected(self) -> None:
         """Deactivate the selected student after warning about unpaid dues."""
         student_id = self._selected_id()
-        if student_id is None or not ensure_admin_write():
+        if student_id is None or not ensure_permission_write("manage_students"):
             return
         with connect_db() as conn:
             due = LedgerService(conn).get_outstanding(student_id, academic_year_id=None)
@@ -293,11 +297,11 @@ class StudentWindow(tk.Toplevel):
             audit(conn, "STUDENT_DEACTIVATE", "students", student_id, old, {"is_active": 0})
         self.refresh()
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("manage_students")
     def mark_left_selected(self) -> None:
         """Mark the selected student as LEFT if no balance remains."""
         student_id = self._selected_id()
-        if student_id is None or not ensure_admin_write():
+        if student_id is None or not ensure_permission_write("manage_students"):
             return
         with connect_db() as conn:
             due = LedgerService(conn).get_outstanding(student_id, academic_year_id=None)
@@ -313,7 +317,7 @@ class StudentWindow(tk.Toplevel):
         """Return all selected active student IDs."""
         return [int(item) for item in self.tree.selection()]
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("manage_students")
     def transfer_certificate_selected(self) -> None:
         """Issue a TC for one active student, requesting override when required."""
         selected = self._selected_ids()
@@ -328,6 +332,13 @@ class StudentWindow(tk.Toplevel):
                 return
             total_dues = float(LedgerService(conn).get_outstanding(student_id, academic_year_id=None) or 0)
             if total_dues > 0:
+                if not auth.can_override_financial_data():
+                    messagebox.showerror(
+                        "Transfer Certificate",
+                        "This student has unpaid dues. Only an administrator can override dues clearance.",
+                        parent=self,
+                    )
+                    return
                 DuesClearanceDialog(self, student_id, on_issued=self._tc_issued)
                 return
             try:
@@ -373,7 +384,7 @@ class StudentWindow(tk.Toplevel):
             os.startfile(path)
         messagebox.showinfo("ID Cards", f"ID cards saved to:\n{path}", parent=self)
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("manage_students")
     def reactivate_archived(self) -> None:
         """Reactivate one archived student with a mandatory audited reason."""
         selected = self.archived_tree.selection()
@@ -392,12 +403,12 @@ class StudentWindow(tk.Toplevel):
             reactivate_student(conn, student_id, reason)
         self.refresh()
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("manage_students")
     def bulk_import(self) -> None:
         """Open the bulk-import dialog."""
         BulkImportDialog(self, on_imported=self.refresh)
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("manage_students")
     def promote_class(self) -> None:
         """Open the class-promotion dialog."""
         PromoteClassDialog(self, on_saved=self.refresh)
@@ -452,203 +463,229 @@ class DuesClearanceDialog(tk.Toplevel):
 
 
 class StudentDialog(tk.Toplevel):
-    """Base dialog for adding or editing student rows."""
+    """Base dialog for the complete student admission profile."""
+
+    FIELD_ROWS = (
+        ("Scholar No", "scholar_no"), ("eKYC Status", "ekyc_status"),
+        ("SL. No.", "serial_no"), ("Student Name", "name"),
+        ("Father's Name", "father_name"), ("Mother's Name", "mother_name"),
+        ("Address", "address"), ("Date of Birth", "dob"),
+        ("Admission Date", "admission_date"), ("Class", "class"),
+        ("Section", "section"), ("Mobile No. 1", "phone"),
+        ("Mobile No. 2", "mobile2"), ("SSSM ID", "sssm_id"),
+        ("Gender", "gender"), ("Aadhaar Card No.", "aadhaar"),
+        ("Category", "category"),
+    )
 
     def __init__(self, master, title: str, on_saved=None):
-        """Initialize common form state."""
         super().__init__(master)
         self.on_saved = on_saved
         self.title(title)
-        self.geometry("430x360")
+        self.geometry("760x690")
         self.configure(bg=SPLASH_BG)
-        self.vars = {key: tk.StringVar() for key in ("name", "class", "section", "aadhaar", "phone", "guardian_name")}
+        self.vars = {key: tk.StringVar() for _label, key in self.FIELD_ROWS}
+        self.vars["ekyc_status"].set("PENDING")
         self._build_form()
 
     def _classes(self) -> list[str]:
-        """Return class names for the active academic year from database rows only."""
         with connect_db() as conn:
-            active = conn.execute("SELECT label FROM academic_years WHERE is_active = 1 LIMIT 1").fetchone()
-            active_label = active["label"] if active else ""
-            rows = conn.execute(
-                """
-                SELECT DISTINCT class FROM fee_structure WHERE academic_year = ? AND class IS NOT NULL AND class <> ''
-                UNION
-                SELECT DISTINCT class FROM students WHERE class IS NOT NULL AND class <> ''
-                ORDER BY class
-                """,
-                (active_label,),
-            ).fetchall()
-        return [row[0] for row in rows]
+            return [row[0] for row in conn.execute("SELECT name FROM classes WHERE is_active=1 ORDER BY name")]
 
-    def _sections(self) -> list[str]:
-        """Return known section values from existing student rows."""
+    def _sections(self, class_name: str | None = None) -> list[str]:
+        class_name = class_name if class_name is not None else self.vars["class"].get()
         with connect_db() as conn:
-            rows = conn.execute("SELECT DISTINCT section FROM students WHERE section IS NOT NULL AND section <> '' ORDER BY section").fetchall()
-        return [row[0] for row in rows]
+            return [row[0] for row in conn.execute(
+                """SELECT s.name FROM sections s JOIN classes c ON c.id=s.class_id
+                   WHERE c.name=? AND c.is_active=1 AND s.is_active=1 ORDER BY s.name""",
+                (class_name,),
+            )]
+
+    def _class_changed(self, _event=None) -> None:
+        values = self._sections()
+        self.section_combo.configure(values=values)
+        if self.vars["section"].get() not in values:
+            self.vars["section"].set("")
 
     def _build_form(self) -> None:
-        """Build the student entry form."""
-        frame = tk.Frame(self, bg=SPLASH_BG)
-        frame.pack(fill="both", expand=True, padx=24, pady=20)
-        fields = (
-            ("Name", "name"), ("Class", "class"), ("Section", "section"),
-            ("Aadhaar", "aadhaar"), ("Phone", "phone"), ("Guardian Name", "guardian_name"),
-        )
-        for row, (label, key) in enumerate(fields):
-            tk.Label(frame, text=label, bg=SPLASH_BG, fg=SPLASH_FG).grid(row=row, column=0, sticky="w", pady=5)
+        outer = tk.Frame(self, bg=SPLASH_BG)
+        outer.pack(fill="both", expand=True, padx=18, pady=14)
+        canvas = tk.Canvas(outer, bg=SPLASH_BG, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        frame = tk.Frame(canvas, bg=SPLASH_BG)
+        frame.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        for index, (label, key) in enumerate(self.FIELD_ROWS):
+            row, pair = divmod(index, 2)
+            column = pair * 2
+            tk.Label(frame, text=label, bg=SPLASH_BG, fg=SPLASH_FG).grid(row=row, column=column, sticky="w", padx=(4, 8), pady=6)
             if key == "class":
-                widget = ttk.Combobox(frame, textvariable=self.vars[key], values=self._classes(), state="readonly")
+                widget = ttk.Combobox(frame, textvariable=self.vars[key], values=self._classes(), state="readonly", width=24)
+                widget.bind("<<ComboboxSelected>>", self._class_changed)
             elif key == "section":
-                widget = ttk.Combobox(frame, textvariable=self.vars[key], values=self._sections())
+                widget = ttk.Combobox(frame, textvariable=self.vars[key], state="readonly", width=24)
+                self.section_combo = widget
+            elif key == "ekyc_status":
+                widget = ttk.Combobox(frame, textvariable=self.vars[key], values=("PENDING", "VERIFIED", "FAILED", "NOT REQUIRED"), state="readonly", width=24)
+            elif key == "gender":
+                widget = ttk.Combobox(frame, textvariable=self.vars[key], values=("Male", "Female", "Other"), state="readonly", width=24)
+            elif key == "category":
+                widget = ttk.Combobox(frame, textvariable=self.vars[key], values=("OBC", "SC", "ST", "General"), state="readonly", width=24)
             else:
-                widget = ttk.Entry(frame, textvariable=self.vars[key])
-            widget.grid(row=row, column=1, sticky="ew", pady=5)
+                widget = ttk.Entry(frame, textvariable=self.vars[key], width=27)
+            widget.grid(row=row, column=column + 1, sticky="ew", padx=(0, 16), pady=6)
             if key == "aadhaar":
                 self.aadhaar_entry = widget
-        frame.columnconfigure(1, weight=1)
-        ttk.Button(frame, text="Save", command=self.save).grid(row=len(fields), column=0, columnspan=2, pady=16)
+        for column in (1, 3):
+            frame.columnconfigure(column, weight=1)
+        ttk.Button(frame, text="Save", command=self.save).grid(
+            row=(len(self.FIELD_ROWS) + 1) // 2, column=0, columnspan=4, pady=18
+        )
 
     def _validate(self, conn: sqlite3.Connection, student_id: int | None = None) -> bool:
-        """Validate common student fields before saving."""
-        if not self.vars["name"].get().strip():
-            messagebox.showerror("Validation", "Name is required.")
+        required = (("scholar_no", "Scholar number"), ("name", "Student name"), ("class", "Class"), ("section", "Section"))
+        for key, label in required:
+            if not self.vars[key].get().strip():
+                messagebox.showerror("Validation", f"{label} is required.", parent=self)
+                return False
+        aadhaar = re.sub(r"\D", "", self.vars["aadhaar"].get())
+        if aadhaar and not AADHAAR_RE.match(aadhaar):
+            messagebox.showerror("Validation", "Aadhaar must be exactly 12 digits when provided.", parent=self)
             return False
-        aadhaar = re.sub(r"\s+", "", self.vars["aadhaar"].get())
-        phone = re.sub(r"\D", "", self.vars["phone"].get())
-        if not AADHAAR_RE.match(aadhaar):
-            messagebox.showerror("Validation", "Aadhaar must be exactly 12 digits.")
-            return False
-        if not PHONE_RE.match(phone):
-            messagebox.showerror("Validation", "Phone must be exactly 10 digits.")
-            return False
-        params = [aadhaar]
-        sql = "SELECT id FROM students WHERE aadhaar = ?"
-        if student_id is not None:
-            sql += " AND id <> ?"
-            params.append(student_id)
-        if conn.execute(sql, params).fetchone():
-            messagebox.showerror("Validation", "Aadhaar already exists.")
-            return False
+        for key, label in (("phone", "Mobile No. 1"), ("mobile2", "Mobile No. 2")):
+            phone = re.sub(r"\D", "", self.vars[key].get())
+            if phone and not PHONE_RE.match(phone):
+                messagebox.showerror("Validation", f"{label} must be exactly 10 digits when provided.", parent=self)
+                return False
+            self.vars[key].set(phone)
+        for column, value, label in (("scholar_no", self.vars["scholar_no"].get().strip(), "Scholar number"), ("aadhaar", aadhaar, "Aadhaar")):
+            if not value:
+                continue
+            sql = f"SELECT id FROM students WHERE {column}=?"
+            params: list[object] = [value]
+            if student_id is not None:
+                sql += " AND id<>?"
+                params.append(student_id)
+            if conn.execute(sql, params).fetchone():
+                messagebox.showerror("Validation", f"{label} already exists.", parent=self)
+                return False
         self.vars["aadhaar"].set(aadhaar)
-        self.vars["phone"].set(phone)
         return True
 
+    def values(self) -> dict[str, str | None]:
+        values = {key: var.get().strip() for key, var in self.vars.items()}
+        values["aadhaar"] = values["aadhaar"] or None
+        values["phone"] = values["phone"] or None
+        values["mobile2"] = values["mobile2"] or None
+        return values
+
     def save(self) -> None:
-        """Save student data in subclasses."""
         raise NotImplementedError
 
 
 class AddStudentDialog(StudentDialog):
-    """Dialog for creating a new student."""
-
     def __init__(self, master, on_saved=None):
-        """Initialize the add-student dialog."""
         super().__init__(master, "Add Student", on_saved)
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("manage_students")
     def save(self) -> None:
-        """Insert a validated student row and audit the operation."""
-        if not ensure_admin_write():
+        if not ensure_permission_write("manage_students"):
             return
         with connect_db() as conn:
             if not self._validate(conn):
                 return
+            values = self.values()
+            columns = tuple(values)
             cursor = conn.execute(
-                """
-                INSERT INTO students (name, class, section, aadhaar, phone, guardian_name, is_active, status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
-                """,
-                (
-                    self.vars["name"].get().strip(), self.vars["class"].get(), self.vars["section"].get().strip(),
-                    self.vars["aadhaar"].get() or None, self.vars["phone"].get() or None,
-                    self.vars["guardian_name"].get().strip(), STATUS_ACTIVE, now_str(),
-                ),
+                f"INSERT INTO students ({','.join(columns)},guardian_name,is_active,status,created_at) "
+                f"VALUES ({','.join('?' for _ in columns)},?,1,?,?)",
+                (*values.values(), values["father_name"] or "", STATUS_ACTIVE, now_str()),
             )
-            audit(conn, "STUDENT_ADD", "students", cursor.lastrowid, None, dict(self.vars_to_values()))
+            audit(conn, "STUDENT_ADD", "students", cursor.lastrowid, None, values)
         if self.on_saved:
             self.on_saved()
         self.destroy()
 
-    def vars_to_values(self) -> dict[str, str]:
-        """Return current form values for audit logging."""
-        return {key: var.get() for key, var in self.vars.items()}
-
 
 class EditStudentDialog(StudentDialog):
-    """Dialog for editing allowed student fields."""
-
     def __init__(self, master, student_id: int, on_saved=None):
-        """Initialize the edit-student dialog."""
         self.student_id = student_id
         super().__init__(master, "Edit Student", on_saved)
         self._load()
-        self.aadhaar_entry.configure(state="readonly")
 
     def _load(self) -> None:
-        """Load existing student values into the form."""
         with connect_db() as conn:
-            row = conn.execute("SELECT * FROM students WHERE id = ?", (self.student_id,)).fetchone()
+            row = conn.execute("SELECT * FROM students WHERE id=?", (self.student_id,)).fetchone()
         if row:
             for key in self.vars:
                 self.vars[key].set(row[key] or "")
+            self.section_combo.configure(values=self._sections(row["class"] or ""))
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("manage_students")
     def save(self) -> None:
-        """Update editable student fields and audit old/new values."""
-        if not ensure_admin_write():
+        if not ensure_permission_write("manage_students"):
             return
         with connect_db() as conn:
             if not self._validate(conn, self.student_id):
                 return
-            old = dict(conn.execute("SELECT * FROM students WHERE id = ?", (self.student_id,)).fetchone())
-            new_values = {
-                "name": self.vars["name"].get().strip(),
-                "class": self.vars["class"].get(),
-                "section": self.vars["section"].get().strip(),
-                "phone": self.vars["phone"].get() or None,
-                "guardian_name": self.vars["guardian_name"].get().strip(),
-            }
+            old = dict(conn.execute("SELECT * FROM students WHERE id=?", (self.student_id,)).fetchone())
+            values = self.values()
+            assignments = ",".join(f"{column}=?" for column in values)
             conn.execute(
-                """
-                UPDATE students
-                SET name = ?, class = ?, section = ?, phone = ?, guardian_name = ?
-                WHERE id = ?
-                """,
-                (*new_values.values(), self.student_id),
+                f"UPDATE students SET {assignments},guardian_name=? WHERE id=?",
+                (*values.values(), values["father_name"] or "", self.student_id),
             )
-            audit(conn, "STUDENT_EDIT", "students", self.student_id, old, new_values)
+            audit(conn, "STUDENT_EDIT", "students", self.student_id, old, values)
         if self.on_saved:
             self.on_saved()
         self.destroy()
 
 
 class BulkImportDialog(tk.Toplevel):
-    """Preview and import school-specific student Excel files."""
+    """Import students using the same columns as the student details form."""
+
+    HEADERS = (
+        "SCHOLAR NO", "EKYC STATUS", "SL. NO.", "STUDENTS NAME", "FATHERS NAME",
+        "MOTHERS NAME", "ADDRESS", "DOB", "ADMISION DATE", "CLASS", "SECTION",
+        "MOBILE NO 1", "MOBILE NO 2", "SSSM ID", "GENDER", "AADHAR CARD NO", "CATEGORY",
+    )
+    FIELD_MAP = {
+        "SCHOLAR NO": "scholar_no", "EKYC STATUS": "ekyc_status", "SL. NO.": "serial_no",
+        "STUDENTS NAME": "name", "FATHERS NAME": "father_name", "MOTHERS NAME": "mother_name",
+        "ADDRESS": "address", "DOB": "dob", "ADMISION DATE": "admission_date",
+        "ADMISSION DATE": "admission_date", "CLASS": "class", "SECTION": "section",
+        "MOBILE NO 1": "phone", "MOBILE NO 2": "mobile2", "SSSM ID": "sssm_id",
+        "GENDER": "gender", "AADHAR CARD NO": "aadhaar", "AADHAAR CARD NO": "aadhaar",
+        "CATEGORY": "category",
+    }
 
     def __init__(self, master, on_imported=None):
-        """Create the bulk-import preview window."""
         super().__init__(master)
         self.on_imported = on_imported
         self.rows: list[dict] = []
         self.title("Bulk Import Students")
-        self.geometry("980x560")
+        self.geometry("1180x600")
         self.configure(bg=SPLASH_BG)
         self.file_var = tk.StringVar()
-        self.summary_var = tk.StringVar(value="Select an .xlsx file to preview.")
+        self.summary_var = tk.StringVar(value="Download the template or select an .xlsx file.")
         self._build_widgets()
 
     def _build_widgets(self) -> None:
-        """Build file picker, preview grid, and import controls."""
         top = tk.Frame(self, bg=SPLASH_BG)
         top.pack(fill="x", padx=12, pady=10)
-        ttk.Entry(top, textvariable=self.file_var, width=80).pack(side="left", padx=(0, 8))
+        ttk.Entry(top, textvariable=self.file_var, width=78).pack(side="left", padx=(0, 8))
         ttk.Button(top, text="Browse", command=self.browse).pack(side="left")
         ttk.Button(top, text="Preview", command=self.preview).pack(side="left", padx=6)
-        columns = ("sl", "name", "class", "dob", "phone", "aadhaar", "status")
+        ttk.Button(top, text="Download Template", command=self.download_template).pack(side="left")
+        columns = ("scholar", "name", "class", "section", "father", "phone", "status")
         self.tree = ttk.Treeview(self, columns=columns, show="headings")
         for column, heading, width in (
-            ("sl", "SL", 60), ("name", "Name", 220), ("class", "Class", 120), ("dob", "DOB", 100),
-            ("phone", "Phone", 110), ("aadhaar", "Aadhaar", 130), ("status", "Status", 260),
+            ("scholar", "Scholar No", 110), ("name", "Student Name", 210),
+            ("class", "Class", 100), ("section", "Section", 80),
+            ("father", "Father's Name", 180), ("phone", "Mobile 1", 110),
+            ("status", "Validation", 300),
         ):
             self.tree.heading(column, text=heading)
             self.tree.column(column, width=width)
@@ -660,144 +697,133 @@ class BulkImportDialog(tk.Toplevel):
         tk.Label(bottom, textvariable=self.summary_var, bg=SPLASH_BG, fg=SPLASH_FG).pack(side="left")
         ttk.Button(bottom, text="Import Valid Rows", command=self.import_valid_rows).pack(side="right")
 
+    def download_template(self) -> None:
+        from openpyxl import Workbook
+
+        path = filedialog.asksaveasfilename(
+            parent=self, defaultextension=".xlsx", initialfile="SFMS_Student_Import_Template.xlsx",
+            filetypes=(("Excel workbooks", "*.xlsx"),),
+        )
+        if not path:
+            return
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Students"
+        sheet.append(self.HEADERS)
+        sheet.freeze_panes = "A2"
+        for cell in sheet[1]:
+            cell.font = cell.font.copy(bold=True)
+        workbook.save(path)
+        messagebox.showinfo("Student Import", f"Template saved to:\n{path}", parent=self)
+
     def browse(self) -> None:
-        """Select an Excel workbook for import."""
-        auth.touch_session()
-        path = filedialog.askopenfilename(filetypes=(("Excel workbooks", "*.xlsx"),))
+        path = filedialog.askopenfilename(parent=self, filetypes=(("Excel workbooks", "*.xlsx"),))
         if path:
             self.file_var.set(path)
 
+    @staticmethod
+    def _cell_text(value) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, datetime):
+            return value.strftime("%d-%m-%Y")
+        if isinstance(value, float) and value.is_integer():
+            return str(int(value))
+        return str(value).strip()
+
     def preview(self) -> None:
-        """Parse and preview import rows from the chosen workbook."""
-        auth.touch_session()
         from openpyxl import load_workbook
 
         path = self.file_var.get().strip()
         if not path:
-            messagebox.showwarning("Select file", "Please select an .xlsx file.")
+            messagebox.showwarning("Student Import", "Select an .xlsx file.", parent=self)
             return
         workbook = load_workbook(path, read_only=True, data_only=True)
-        if "full detail 100" not in workbook.sheetnames:
-            messagebox.showerror("Invalid file", "Expected sheet 'full detail 100'.")
+        sheet = workbook["Students"] if "Students" in workbook.sheetnames else workbook.active
+        iterator = sheet.iter_rows(values_only=True)
+        try:
+            raw_headers = next(iterator)
+        except StopIteration:
+            messagebox.showerror("Student Import", "The workbook is empty.", parent=self)
             return
-        self.rows = self._parse_sheet(workbook["full detail 100"])
+        headers = [self._cell_text(value).upper() for value in raw_headers]
+        mapped = {index: self.FIELD_MAP[name] for index, name in enumerate(headers) if name in self.FIELD_MAP}
+        missing = [name for name in self.HEADERS if self.FIELD_MAP[name] not in mapped.values()]
+        if missing:
+            messagebox.showerror("Student Import", "Missing columns: " + ", ".join(missing), parent=self)
+            return
+        with connect_db() as conn:
+            classes = {row[0] for row in conn.execute("SELECT name FROM classes WHERE is_active=1")}
+            sections = {(row[0], row[1]) for row in conn.execute(
+                "SELECT c.name,s.name FROM sections s JOIN classes c ON c.id=s.class_id WHERE c.is_active=1 AND s.is_active=1"
+            )}
+            existing_scholars = {str(row[0]) for row in conn.execute("SELECT scholar_no FROM students WHERE COALESCE(scholar_no,'')<>''")}
+            existing_aadhaar = {str(row[0]) for row in conn.execute("SELECT aadhaar FROM students WHERE COALESCE(aadhaar,'')<>''")}
+        seen_scholars: set[str] = set()
+        seen_aadhaar: set[str] = set()
+        self.rows = []
+        for excel_row, raw in enumerate(iterator, start=2):
+            values = {field: self._cell_text(raw[index] if index < len(raw) else "") for index, field in mapped.items()}
+            if not any(values.values()):
+                continue
+            values["aadhaar"] = re.sub(r"\D", "", values["aadhaar"])
+            values["phone"] = re.sub(r"\D", "", values["phone"])
+            values["mobile2"] = re.sub(r"\D", "", values["mobile2"])
+            errors = []
+            for key, label in (("scholar_no", "Scholar No"), ("name", "Student Name"), ("class", "Class"), ("section", "Section")):
+                if not values[key]:
+                    errors.append(f"{label} required")
+            if values["class"] and values["class"] not in classes:
+                errors.append("Class not in master")
+            if values["class"] and values["section"] and (values["class"], values["section"]) not in sections:
+                errors.append("Section not in class master")
+            if values["scholar_no"] in existing_scholars or values["scholar_no"] in seen_scholars:
+                errors.append("Duplicate Scholar No")
+            if values["aadhaar"] and (not AADHAAR_RE.match(values["aadhaar"]) or values["aadhaar"] in existing_aadhaar or values["aadhaar"] in seen_aadhaar):
+                errors.append("Invalid/duplicate Aadhaar")
+            for key, label in (("phone", "Mobile 1"), ("mobile2", "Mobile 2")):
+                if values[key] and not PHONE_RE.match(values[key]):
+                    errors.append(f"Invalid {label}")
+            if values["category"].upper() == "GENEREL":
+                values["category"] = "General"
+            values["status"] = "; ".join(errors) if errors else "OK"
+            values["excel_row"] = excel_row
+            self.rows.append(values)
+            seen_scholars.add(values["scholar_no"])
+            if values["aadhaar"]:
+                seen_aadhaar.add(values["aadhaar"])
         self._render_preview()
 
-    def _parse_sheet(self, sheet) -> list[dict]:
-        """Parse all current-year class sections from the Excel sheet."""
-        parsed = []
-        current_class = None
-        headers = None
-        aadhaar_seen = set()
-        with connect_db() as conn:
-            existing_aadhaar = {row[0] for row in conn.execute("SELECT aadhaar FROM students WHERE aadhaar IS NOT NULL AND aadhaar <> ''")}
-        for row in sheet.iter_rows(values_only=True):
-            values = list(row)
-            first_cells = [str(value).strip() for value in values[:5] if value not in (None, "")]
-            section_title = " ".join(first_cells)
-            if "26-27" in section_title:
-                if "OLD" in section_title.upper() or "25-26" in section_title:
-                    current_class = None
-                else:
-                    current_class = normalize_class(section_title.replace("26-27", "").strip())
-                headers = None
-                continue
-            if current_class is None:
-                continue
-            lowered = [str(value).strip().lower() if value is not None else "" for value in values]
-            if any("student" in value and "name" in value for value in lowered):
-                headers = {name: index for index, name in enumerate(lowered) if name}
-                continue
-            if headers is None:
-                continue
-            item = build_import_row(values, headers, current_class, existing_aadhaar, aadhaar_seen)
-            if item:
-                parsed.append(item)
-                if item["aadhaar"]:
-                    aadhaar_seen.add(item["aadhaar"])
-        return parsed
-
     def _render_preview(self) -> None:
-        """Render parsed rows into the preview tree."""
-        for item in self.tree.get_children():
-            self.tree.delete(item)
+        self.tree.delete(*self.tree.get_children())
         valid = 0
-        errors = 0
-        for index, row in enumerate(self.rows, start=1):
+        for row in self.rows:
             ok = row["status"] == "OK"
-            valid += 1 if ok else 0
-            errors += 0 if ok else 1
-            self.tree.insert(
-                "", "end", values=(index, row["name"], row["class"], row["dob"], row["phone"], display_aadhaar(row["aadhaar"], "ADMIN"), row["status"]),
-                tags=("ok" if ok else "error",),
-            )
-        self.summary_var.set(f"{valid} valid, {errors} errors")
+            valid += int(ok)
+            self.tree.insert("", "end", values=(row["scholar_no"], row["name"], row["class"], row["section"], row["father_name"], row["phone"], row["status"]), tags=("ok" if ok else "error",))
+        self.summary_var.set(f"{valid} valid, {len(self.rows) - valid} errors")
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("manage_students")
     def import_valid_rows(self) -> None:
-        """Insert only preview rows that passed validation."""
-        if not ensure_admin_write():
+        if not ensure_permission_write("manage_students"):
             return
         valid_rows = [row for row in self.rows if row["status"] == "OK"]
-        skipped = len(self.rows) - len(valid_rows)
-        imported = 0
+        if not valid_rows:
+            messagebox.showwarning("Student Import", "There are no valid rows to import.", parent=self)
+            return
+        columns = tuple(self.FIELD_MAP[name] for name in self.HEADERS)
         with connect_db() as conn:
             for row in valid_rows:
                 cursor = conn.execute(
-                    """
-                    INSERT INTO students (
-                        name, class, section, aadhaar, phone, guardian_name, is_active, status, created_at,
-                        dob, gender, category, route, vehicle_fee, has_vehicle_fee
-                    ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        row["name"], row["class"], row["section"], row["aadhaar"], row["phone"], row["guardian_name"],
-                        STATUS_ACTIVE, now_str(), row["dob"], row["gender"], row["category"], row["route"],
-                        row["vehicle_fee"], 1 if row["has_vehicle_fee"] else 0,
-                    ),
+                    f"INSERT INTO students ({','.join(columns)},guardian_name,is_active,status,created_at) "
+                    f"VALUES ({','.join('?' for _ in columns)},?,1,?,?)",
+                    (*(row[column] or None for column in columns), row["father_name"], STATUS_ACTIVE, now_str()),
                 )
-                audit(conn, "BULK_IMPORT", "students", cursor.lastrowid, None, row)
-                imported += 1
-        if imported and self._should_seed_fee_structure():
-            self._seed_fee_structure()
-        messagebox.showinfo("Bulk import", f"Imported {imported} students. Skipped {skipped} rows with errors.")
+                audit(conn, "STUDENT_IMPORT", "students", cursor.lastrowid, None, {column: row[column] for column in columns})
+        messagebox.showinfo("Student Import", f"Imported {len(valid_rows)} students.", parent=self)
         if self.on_imported:
             self.on_imported()
         self.destroy()
-
-    def _should_seed_fee_structure(self) -> bool:
-        """Return True when fee_structure for 2026-27 is empty and user confirms seeding."""
-        with connect_db() as conn:
-            count = conn.execute("SELECT COUNT(*) FROM fee_structure WHERE academic_year = ?", ("2026-27",)).fetchone()[0]
-        return count == 0 and messagebox.askyesno("Seed fee structure", "Also seed fee structure for 2026-27?")
-
-    def _seed_fee_structure(self) -> None:
-        """Seed standard 2026-27 fee heads and class fee amounts."""
-        if not ensure_admin_write():
-            return
-        with connect_db() as conn:
-            head_ids = {}
-            for name, register_type in FEE_HEADS:
-                row = conn.execute("SELECT id FROM fee_heads WHERE name = ?", (name,)).fetchone()
-                if row:
-                    head_ids[name] = row["id"]
-                else:
-                    cursor = conn.execute("INSERT INTO fee_heads (name, register_type, is_active) VALUES (?, ?, 1)", (name, register_type))
-                    head_ids[name] = cursor.lastrowid
-                    audit(conn, "FEE_HEAD_ADD", "fee_heads", cursor.lastrowid, None, {"name": name, "register_type": register_type})
-            regular_heads = ["Admission Fee", "Tuition Fee", "Term Exam Fee", "Computer Fee", "Sports & Activity Fee"]
-            for class_name, amounts in FEE_SEED.items():
-                for head_name, amount in zip(regular_heads, amounts):
-                    conn.execute(
-                        "INSERT INTO fee_structure (academic_year, class, fee_head_id, amount, due_date) VALUES (?, ?, ?, ?, ?)",
-                        ("2026-27", class_name, head_ids[head_name], amount, ""),
-                    )
-            for route, amount in VEHICLE_FEES.items():
-                conn.execute(
-                    "INSERT INTO fee_structure (academic_year, class, fee_head_id, amount, due_date) VALUES (?, ?, ?, ?, ?)",
-                    ("2026-27", route, head_ids["Vehicle Fee"], amount, ""),
-                )
-            audit(conn, "FEE_STRUCTURE_SEED", "fee_structure", "2026-27", None, {"academic_year": "2026-27"})
 
 
 class PromoteClassDialog(tk.Toplevel):
@@ -852,10 +878,10 @@ class PromoteClassDialog(tk.Toplevel):
             values[0] = "No" if values[0] == "Yes" else "Yes"
             self.tree.item(item, values=values)
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("manage_students")
     def confirm(self) -> None:
         """Promote selected students to the target class and audit each update."""
-        if not ensure_admin_write():
+        if not ensure_permission_write("manage_students"):
             return
         source = self.source_var.get()
         target = self.target_var.get()

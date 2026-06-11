@@ -66,13 +66,53 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             last_login TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS user_permissions (
+            user_id INTEGER NOT NULL,
+            permission_key TEXT NOT NULL,
+            allowed INTEGER NOT NULL CHECK(allowed IN (0,1)),
+            updated_at TEXT NOT NULL,
+            updated_by INTEGER,
+            PRIMARY KEY(user_id, permission_key),
+            FOREIGN KEY (user_id) REFERENCES users(id),
+            FOREIGN KEY (updated_by) REFERENCES users(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS classes (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS sections (
+            id INTEGER PRIMARY KEY,
+            class_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT,
+            UNIQUE(class_id, name),
+            FOREIGN KEY(class_id) REFERENCES classes(id)
+        );
+
         CREATE TABLE IF NOT EXISTS students (
             id INTEGER PRIMARY KEY,
+            scholar_no TEXT UNIQUE,
+            ekyc_status TEXT DEFAULT 'PENDING',
+            serial_no TEXT,
             name TEXT NOT NULL,
+            father_name TEXT,
+            mother_name TEXT,
+            address TEXT,
+            dob TEXT,
+            admission_date TEXT,
             class TEXT,
             section TEXT,
             aadhaar TEXT UNIQUE,
             phone TEXT,
+            mobile2 TEXT,
+            sssm_id TEXT,
+            gender TEXT,
+            category TEXT,
             guardian_name TEXT,
             is_active INTEGER DEFAULT 1,
             status TEXT DEFAULT '{STATUS_ACTIVE}',

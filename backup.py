@@ -20,7 +20,7 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 from app_events import signal_backup_warning
 from audit import log_operational_event
-from config import BACKUPS_DIR, DB_PATH
+from config import BACKUPS_DIR, DB_PATH, INTEGRITY_KEY_PATH
 from notifications import backup_overdue
 from utils import now_str
 
@@ -36,6 +36,8 @@ MAX_BACKUP_FILES = 30
 CONSECUTIVE_FAILURES_SETTING = "consecutive_backup_failures"
 LAST_SUCCESS_SETTING = "last_successful_backup_at"
 BACKUP_MAGIC = b"SFMSENC2"
+RECOVERY_BACKUP_MAGIC = b"SFMSENC3"
+KEY_LENGTH_SIZE = 2
 
 REQUIRED_TABLES = [
     "users", "students", "fee_heads", "fee_structure", "payments", "receipts",
@@ -179,8 +181,24 @@ def _connection(conn=None):
     return sqlite3.connect(DB_PATH), True
 
 
+def _recovery_payload(database: bytes, integrity_key_value: bytes) -> bytes:
+    if len(integrity_key_value) > 65535:
+        raise ValueError("Integrity key is too large for the recovery envelope.")
+    return len(integrity_key_value).to_bytes(KEY_LENGTH_SIZE, "big") + integrity_key_value + database
+
+
+def _split_recovery_payload(payload: bytes) -> tuple[bytes, bytes]:
+    if len(payload) < KEY_LENGTH_SIZE:
+        raise ValueError("Backup recovery payload is invalid.")
+    key_length = int.from_bytes(payload[:KEY_LENGTH_SIZE], "big")
+    boundary = KEY_LENGTH_SIZE + key_length
+    if key_length < 32 or len(payload) <= boundary:
+        raise ValueError("Backup recovery payload is invalid.")
+    return payload[boundary:], payload[KEY_LENGTH_SIZE:boundary]
+
+
 def encrypt_backup(filepath, password=None, *, conn=None) -> str:
-    """Encrypt a backup with the random DEK, never with a password hash."""
+    """Encrypt the database and integrity key in a self-contained recovery envelope."""
     global _UNLOCKED_DEK
     source = Path(filepath)
     if not source.is_file():
@@ -190,10 +208,28 @@ def encrypt_backup(filepath, password=None, *, conn=None) -> str:
         dek = _unwrap_dek(connection, password) if password is not None else _UNLOCKED_DEK
         if dek is None:
             raise ValueError("Backup key is locked. Enter the master backup password.")
+        from receipt_integrity import integrity_key_for_database
+
+        recovery_payload = _recovery_payload(
+            source.read_bytes(), integrity_key_for_database(connection)
+        )
+        salt = _decode_setting(connection, KDF_SALT_SETTING)
+        wrap_nonce = _decode_setting(connection, WRAP_NONCE_SETTING)
+        wrapped_dek = _decode_setting(connection, WRAPPED_DEK_SETTING)
+        if len(wrapped_dek) > 65535:
+            raise ValueError("Wrapped backup key is too large.")
         nonce = os.urandom(NONCE_SIZE)
-        ciphertext = AESGCM(dek).encrypt(nonce, source.read_bytes(), BACKUP_MAGIC)
+        ciphertext = AESGCM(dek).encrypt(nonce, recovery_payload, RECOVERY_BACKUP_MAGIC)
         encrypted_path = Path(f"{source}.enc")
-        encrypted_path.write_bytes(BACKUP_MAGIC + nonce + ciphertext)
+        encrypted_path.write_bytes(
+            RECOVERY_BACKUP_MAGIC
+            + salt
+            + wrap_nonce
+            + len(wrapped_dek).to_bytes(KEY_LENGTH_SIZE, "big")
+            + wrapped_dek
+            + nonce
+            + ciphertext
+        )
         source.unlink()
         return str(encrypted_path)
     finally:
@@ -201,31 +237,77 @@ def encrypt_backup(filepath, password=None, *, conn=None) -> str:
             connection.close()
 
 
-def decrypt_backup(enc_filepath, password, *, conn=None) -> str:
-    """Decrypt an encrypted backup after unwrapping the stable DEK."""
+def _decrypt_recovery_envelope(payload: bytes, password: str, conn=None) -> tuple[bytes, bytes]:
+    offset = len(RECOVERY_BACKUP_MAGIC)
+    minimum = offset + SALT_SIZE + NONCE_SIZE + KEY_LENGTH_SIZE + NONCE_SIZE + 16
+    if len(payload) <= minimum:
+        raise ValueError("Backup recovery envelope is invalid.")
+    salt = payload[offset:offset + SALT_SIZE]
+    offset += SALT_SIZE
+    wrap_nonce = payload[offset:offset + NONCE_SIZE]
+    offset += NONCE_SIZE
+    wrapped_length = int.from_bytes(payload[offset:offset + KEY_LENGTH_SIZE], "big")
+    offset += KEY_LENGTH_SIZE
+    wrapped_dek = payload[offset:offset + wrapped_length]
+    offset += wrapped_length
+    nonce = payload[offset:offset + NONCE_SIZE]
+    ciphertext = payload[offset + NONCE_SIZE:]
+    try:
+        dek = AESGCM(_derive_key(password, salt)).decrypt(wrap_nonce, wrapped_dek, b"SFMS-DEK")
+    except (InvalidTag, ValueError, TypeError):
+        if conn is None:
+            raise ValueError("Wrong password") from None
+        try:
+            dek = _unwrap_dek(conn, password)
+        except ValueError:
+            raise ValueError("Wrong password") from None
+    try:
+        plaintext = AESGCM(dek).decrypt(nonce, ciphertext, RECOVERY_BACKUP_MAGIC)
+    except InvalidTag as exc:
+        raise ValueError("Backup authentication failed; the file may be damaged or tampered with.") from exc
+    return _split_recovery_payload(plaintext)
+
+
+def _decrypt_backup_bytes(enc_filepath, password, *, conn=None) -> tuple[bytes, bytes | None]:
     encrypted = Path(enc_filepath)
     if not encrypted.is_file():
         raise FileNotFoundError(str(encrypted))
     payload = encrypted.read_bytes()
-    if not payload.startswith(BACKUP_MAGIC) or len(payload) <= len(BACKUP_MAGIC)+NONCE_SIZE:
+    if payload.startswith(RECOVERY_BACKUP_MAGIC):
+        connection, close = _connection(conn) if conn is not None else (None, False)
+        try:
+            return _decrypt_recovery_envelope(payload, password, connection)
+        finally:
+            if close and connection is not None:
+                connection.close()
+    if not payload.startswith(BACKUP_MAGIC) or len(payload) <= len(BACKUP_MAGIC) + NONCE_SIZE:
         raise ValueError("Wrong password")
     connection, close = _connection(conn)
     try:
         dek = _unwrap_dek(connection, password)
-        nonce = payload[len(BACKUP_MAGIC):len(BACKUP_MAGIC)+NONCE_SIZE]
+        nonce = payload[len(BACKUP_MAGIC):len(BACKUP_MAGIC) + NONCE_SIZE]
         try:
-            plaintext = AESGCM(dek).decrypt(nonce, payload[len(BACKUP_MAGIC)+NONCE_SIZE:], BACKUP_MAGIC)
+            plaintext = AESGCM(dek).decrypt(
+                nonce, payload[len(BACKUP_MAGIC) + NONCE_SIZE:], BACKUP_MAGIC
+            )
         except InvalidTag as exc:
             raise ValueError("Wrong password") from exc
+        return plaintext, None
     finally:
         if close:
             connection.close()
+
+
+def decrypt_backup(enc_filepath, password, *, conn=None) -> str:
+    """Decrypt a backup to a temporary database; recovery key installation is deferred."""
+    plaintext, _integrity_key_value = _decrypt_backup_bytes(enc_filepath, password, conn=conn)
     handle = tempfile.NamedTemporaryFile(prefix="sfms_restore_", suffix=".db", delete=False)
     try:
         handle.write(plaintext)
         return handle.name
     finally:
         handle.close()
+
 
 def _prune_backups() -> None:
     """Keep only the newest configured number of regular backup files."""
@@ -286,10 +368,28 @@ def manual_backup(conn, created_by_user_id) -> str:
 
 
 def auto_backup(conn) -> str | None:
-    """Create a system auto-backup only when the configured interval is overdue."""
+    """Create an automatic backup and copy it off-machine when Drive is configured."""
     if not backup_overdue(conn):
         return None
-    return _create_backup(conn, "SYSTEM", "AUTO")
+    path = _create_backup(conn, "SYSTEM", "AUTO")
+    try:
+        from gdrive import upload_to_drive
+
+        upload_to_drive(path)
+    except Exception as exc:
+        log_operational_event(
+            "DRIVE_BACKUP_FAILED",
+            None,
+            {
+                "table": "backups_log",
+                "record_id": path,
+                "error_type": type(exc).__name__,
+                "error_message": str(exc)[:500],
+            },
+            conn=conn,
+        )
+        conn.commit()
+    return path
 
 
 
@@ -396,8 +496,15 @@ def restore_backup(backup_filepath, password=None) -> bool:
     """Preview, confirm, replace the live database, and restart the application."""
     selected = Path(backup_filepath)
     temporary_path: str | None = None
+    recovered_integrity_key: bytes | None = None
     if str(selected).lower().endswith(".enc"):
-        temporary_path = decrypt_backup(selected, password)
+        plaintext, recovered_integrity_key = _decrypt_backup_bytes(selected, password)
+        handle = tempfile.NamedTemporaryFile(prefix="sfms_restore_", suffix=".db", delete=False)
+        try:
+            handle.write(plaintext)
+            temporary_path = handle.name
+        finally:
+            handle.close()
         database_path = Path(temporary_path)
     else:
         database_path = selected
@@ -427,6 +534,17 @@ def restore_backup(backup_filepath, password=None) -> bool:
         for suffix in ("-wal", "-shm"):
             Path(f"{live_path}{suffix}").unlink(missing_ok=True)
         os.replace(replacement, live_path)
+        if recovered_integrity_key is not None:
+            encoded_key = base64.urlsafe_b64encode(recovered_integrity_key).decode("ascii") + "\n"
+            key_path = Path(INTEGRITY_KEY_PATH)
+            key_path.parent.mkdir(parents=True, exist_ok=True)
+            key_replacement = key_path.with_name(f"{key_path.name}.restore_tmp")
+            key_replacement.write_text(encoded_key, encoding="ascii")
+            try:
+                key_replacement.chmod(0o600)
+            except OSError:
+                pass
+            os.replace(key_replacement, key_path)
         os.execv(sys.executable, [sys.executable] + sys.argv)
         return True
     finally:

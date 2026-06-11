@@ -6,6 +6,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 import auth
+from ui_workspace import WorkspacePage
 from audit import log_financial_action
 from config import SPLASH_BG, SPLASH_FG
 from ledger import active_academic_year, add_adjustment, ensure_student_charges
@@ -14,13 +15,13 @@ from ui_collection_common import connect_db, search_students
 from utils import now_str
 
 
-class DiscountWindow(tk.Toplevel):
+class DiscountWindow(WorkspacePage):
     """Admin-only window for creating student fee discounts."""
 
-    @auth.require_role("ADMIN")
-    def __init__(self, master=None):
+    @auth.require_permission("manage_discounts")
+    def __init__(self, master=None, *, embedded: bool = False):
         """Create the discount window."""
-        super().__init__(master)
+        super().__init__(master, embedded=embedded)
         self.title("Discount")
         self.geometry("760x520")
         self.configure(bg=SPLASH_BG)
@@ -76,7 +77,7 @@ class DiscountWindow(tk.Toplevel):
         selection = self.tree.selection()
         self.selected_student_id = int(selection[0]) if selection else None
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("manage_discounts")
     def save(self) -> None:
         """Insert a discount row; trigger handles audit logging."""
         if self.selected_student_id is None:

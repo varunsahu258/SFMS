@@ -2,9 +2,11 @@
 
 from pathlib import Path
 
-from data_paths import apply_restrictive_acl, get_app_data_dir
+from data_paths import apply_restrictive_acl, get_app_config_dir, get_app_data_dir
 
 BASE_DIR = get_app_data_dir()
+CONFIG_DIR = get_app_config_dir()
+INTEGRITY_KEY_PATH = CONFIG_DIR / "integrity.key"
 DB_PATH = BASE_DIR / "fees_data.db"
 RECEIPTS_DIR = BASE_DIR / "receipts"
 REPORTS_DIR = BASE_DIR / "reports"
@@ -19,10 +21,12 @@ DEFAULT_ADMIN_ACTIVE = 1
 
 SCHOOL_NAME = "Sanskriti Vidhya Mandir High School"
 SCHOOL_ADDRESS = "Bareli (Raisen) M.P."
+RECEIPT_ISSUER_NAME = "Sonali Sahu"
 LOGO_PATH = ""
 
 SETTING_SCHOOL_NAME = "school_name"
 SETTING_SCHOOL_ADDRESS = "school_address"
+SETTING_RECEIPT_ISSUER_NAME = "receipt_issuer_name"
 SETTING_LOGO_PATH = "logo_path"
 SETTING_SESSION_TIMEOUT_MINUTES = "session_timeout_minutes"
 SETTING_BACKUP_INTERVAL_HOURS = "backup_interval_hours"
@@ -65,3 +69,4 @@ for directory in (RECEIPTS_DIR, REPORTS_DIR, BACKUPS_DIR):
     Path(directory).mkdir(parents=True, exist_ok=True)
 
 apply_restrictive_acl(BASE_DIR)
+apply_restrictive_acl(CONFIG_DIR)

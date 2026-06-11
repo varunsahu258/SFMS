@@ -31,3 +31,25 @@ def test_existing_accountant_does_not_open_setup_wizard():
         "v001_base_settings", "v002_setup_defaults", "v003_receipt_hmac",
         "v004_receipt_print_tracking"
     ]
+
+
+def test_accountant_permission_migration_is_idempotent():
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE users(id INTEGER PRIMARY KEY)")
+    from migrations import migration_v010_accountant_permissions
+
+    migration_v010_accountant_permissions(conn)
+    migration_v010_accountant_permissions(conn)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(user_permissions)")}
+    assert {"user_id", "permission_key", "allowed", "updated_at", "updated_by"} <= columns
+
+
+def test_receipt_issuer_setting_migration_adds_default():
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT)")
+    from migrations import migration_v011_receipt_issuer_setting
+
+    migration_v011_receipt_issuer_setting(conn)
+    assert conn.execute(
+        "SELECT value FROM settings WHERE key='receipt_issuer_name'"
+    ).fetchone()[0] == "Sonali Sahu"
