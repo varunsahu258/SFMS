@@ -444,10 +444,6 @@ def migration_v014_admissions(conn: sqlite3.Connection) -> None:
     conn.execute(
         "UPDATE fee_heads SET is_one_time=1 WHERE LOWER(TRIM(name)) LIKE 'admission fee%'"
     )
-    conn.execute(
-        "DELETE FROM fee_structure WHERE fee_head_id IN "
-        "(SELECT id FROM fee_heads WHERE is_one_time=1)"
-    )
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS admissions(

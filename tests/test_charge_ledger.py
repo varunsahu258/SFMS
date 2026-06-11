@@ -284,3 +284,15 @@ def test_advance_payment_persists_upi_and_cheque_modes(monkeypatch):
         (cheque["payment_id"],),
     ).fetchone()
     assert tuple(tracker) == ("CH-42", "School Bank", "PENDING")
+
+
+def test_one_time_admission_head_is_not_generated_from_class_fee_structure():
+    conn = sqlite3.connect(":memory:")
+    schema(conn)
+    conn.execute("ALTER TABLE fee_heads ADD COLUMN is_one_time INTEGER NOT NULL DEFAULT 0")
+    conn.execute("INSERT INTO fee_heads(id,name,register_type,is_active,is_one_time) VALUES(2,'Admission Fee','BIG',1,1)")
+    conn.execute("INSERT INTO fee_structure(id,academic_year,class,fee_head_id,amount,due_date) VALUES(20,'2026-27','1',2,500,'01-04-2026')")
+
+    ensure_student_charges(conn, "2026-27", 1)
+
+    assert conn.execute("SELECT COUNT(*) FROM student_charges WHERE fee_head_id=2").fetchone()[0] == 0
