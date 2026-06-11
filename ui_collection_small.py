@@ -14,5 +14,9 @@ class CollectionSmallWindow(CollectionBaseWindow):
     def __init__(self, master=None, *, embedded: bool = False):
         super().__init__(master, embedded=embedded)
 
+    @auth.require_permission("collect_small_fees")
+    def __init__(self, master=None, *, embedded: bool = False):
+        super().__init__(master, embedded=embedded)
+
     register_types = ("SMALL", "BOTH")
     receipt_type = "SMALL"
