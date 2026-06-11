@@ -109,7 +109,7 @@ class DashboardWindow(tk.Toplevel):
         self.geometry(f"{width}x{height}+{x_position}+{y_position}")
 
     def _build_widgets(self) -> None:
-        """Build a persistent modern sidebar, header, and single-page workspace."""
+        """Build a dashboard-first workspace without a persistent left navigation bar."""
         self._nav_buttons: dict[str, tk.Button] = {}
         self._active_page = None
         self._active_nav_key = "dashboard"
@@ -123,114 +123,46 @@ class DashboardWindow(tk.Toplevel):
 
         shell = tk.Frame(self, bg=palette["page"])
         shell.pack(fill="both", expand=True)
-        sidebar = tk.Frame(shell, bg=palette["sidebar"], width=238)
-        sidebar.pack(side="left", fill="y")
-        sidebar.pack_propagate(False)
-        main = tk.Frame(shell, bg=palette["page"])
-        main.pack(side="left", fill="both", expand=True)
-
-        brand = tk.Frame(sidebar, bg=palette["sidebar"])
-        brand.pack(fill="x", padx=20, pady=(24, 20))
-        tk.Label(brand, text="S", bg="white", fg=palette["accent"], width=3, height=1,
-                 font=("Segoe UI", 17, "bold")).pack(side="left")
-        tk.Label(brand, text="  SFMS", bg=palette["sidebar"], fg="white",
-                 font=("Segoe UI", 16, "bold")).pack(side="left")
-
-        nav_canvas = tk.Canvas(sidebar, bg=palette["sidebar"], highlightthickness=0)
-        nav_scroll = ttk.Scrollbar(sidebar, orient="vertical", command=nav_canvas.yview)
-        nav_canvas.configure(yscrollcommand=nav_scroll.set)
-        nav_scroll.pack(side="right", fill="y")
-        nav_canvas.pack(side="left", fill="both", expand=True)
-        nav = tk.Frame(nav_canvas, bg=palette["sidebar"])
-        nav_window = nav_canvas.create_window((0, 0), window=nav, anchor="nw", width=220)
-        nav.bind("<Configure>", lambda _event: nav_canvas.configure(scrollregion=nav_canvas.bbox("all")))
-        nav_canvas.bind("<Configure>", lambda event: nav_canvas.itemconfigure(nav_window, width=event.width))
-
-        def section(text: str) -> None:
-            tk.Label(nav, text=text.upper(), bg=palette["sidebar"], fg="#c9bff0",
-                     font=("Segoe UI", 8, "bold"), anchor="w").pack(fill="x", padx=22, pady=(16, 5))
-
-        def nav_item(key: str, text: str, command, symbol: str = "•") -> None:
-            button = tk.Button(
-                nav, text=f" {symbol}   {text}", command=command, anchor="w", relief="flat", bd=0,
-                bg=palette["sidebar"], fg="white", activebackground=palette["sidebar_hover"],
-                activeforeground="white", font=("Segoe UI", 10), padx=16, pady=9, cursor="hand2",
-            )
-            button.pack(fill="x", padx=10, pady=2)
-            self._nav_buttons[key] = button
-
-        nav_item("dashboard", "Dashboard", self._show_dashboard, "▦")
-        section("Fee Collection")
-        for key, permission, text, command, symbol in (
-            ("main_collection", "collect_main_fees", "Main Collection", self._on_main_collection_click, "₹"),
-            ("small_collection", "collect_small_fees", "Small Collection", self._on_small_collection_click, "₹"),
-            ("advance", "collect_advance_payments", "Advance Payment", self._on_advance_payment_click, "+"),
-            ("dues", "view_dues", "Student Dues", self._on_dues_click, "◷"),
-            ("dues_register", "view_dues", "Dues Register", self._on_dues_register_click, "▤"),
-            ("cheques", "manage_cheques", "Cheque Management", self._on_cheques_click, "▤"),
-        ):
-            if auth.has_permission(permission):
-                nav_item(key, text, command, symbol)
-        section("School Records")
-        for key, permission, text, command, symbol in (
-            ("admissions", "manage_admissions", "New Admissions", self._on_admissions_click, "+"),
-            ("students", "manage_students", "Students", self._on_students_click, "♟"),
-            ("student_view", "view_student_details", "View Student Details", self._on_student_view_click, "◉"),
-            ("receipt_history", "view_receipts", "Receipt History", self._on_receipt_history_click, "⌕"),
-            ("classes", "manage_classes", "Classes & Sections", self._on_classes_click, "▥"),
-            ("reports", "view_reports", "Reports", self._on_reports_click, "▧"),
-            ("timetable", "view_timetable", "Timetable", self._on_timetable_click, "▦"),
-            ("notices", "issue_fee_notices", "Fee Notices", self._on_fee_notices_click, "✉"),
-        ):
-            if auth.has_permission(permission):
-                nav_item(key, text, command, symbol)
-        section("Administration")
-        admin_items = (
-            ("discounts", "manage_discounts", "Discounts", self._on_discount_click, "%"),
-            ("exemptions", "manage_exemptions", "Exemptions", self._on_exemption_click, "◇"),
-            ("fee_heads", "manage_fee_heads", "Fee Heads", self._on_fee_heads_click, "≡"),
-            ("fee_structure", "manage_fee_structure", "Fee Structure", self._on_fee_structure_click, "▦"),
-            ("late_fees", "apply_late_fees", "Apply Late Fees", self._on_late_fees_click, "+"),
-            ("years", "manage_academic_years", "Academic Years", self._on_academic_years_click, "□"),
-            ("reprint", "reprint_receipts", "Receipt Reprint", self._on_receipt_reprint_click, "↻"),
-            ("void", "void_payments", "Void Payment", self._on_void_payment_click, "×"),
-            ("audit", "view_audit_log", "Audit Log", self._on_audit_log_click, "⌕"),
-        )
-        for key, permission, text, command, symbol in admin_items:
-            if auth.has_permission(permission):
-                nav_item(key, text, command, symbol)
-        if auth.CURRENT_SESSION is not None and auth.CURRENT_SESSION.role == "ADMIN":
-            nav_item("users", "Users", self._on_users_click, "♟")
-            nav_item("permissions", "Accountant Permissions", self._on_permissions_click, "✓")
-            nav_item("settings", "Settings", self._on_settings_click, "⚙")
-        section("Account")
-        nav_item("backup", "Backup & Restore", self._open_backup_window, "⇩")
-        nav_item("password", "Change Password", self._on_change_password_click, "⚿")
-        nav_item("help", "Help", self._on_help_click, "?")
-        nav_item("logout", "Logout", self._on_logout_click, "↪")
-
-        header = tk.Frame(main, bg=palette["card"], height=82, highlightthickness=1,
+        header = tk.Frame(shell, bg=palette["card"], height=86, highlightthickness=1,
                           highlightbackground=palette["border"])
         header.pack(fill="x")
         header.pack_propagate(False)
+
+        home = tk.Button(
+            header, text="SFMS  •  Home", command=self._show_dashboard, relief="flat", bd=0,
+            bg=palette["accent"], fg="white", activebackground=palette["sidebar_hover"],
+            activeforeground="white", font=("Segoe UI", 12, "bold"), padx=20, pady=10,
+            cursor="hand2",
+        )
+        home.pack(side="left", padx=(18, 16), pady=17)
+        self._nav_buttons["dashboard"] = home
+
         title_box = tk.Frame(header, bg=palette["card"])
-        title_box.pack(side="left", fill="y", padx=28)
+        title_box.pack(side="left", fill="y")
         self.workspace_title = tk.StringVar(value="Dashboard")
         tk.Label(title_box, textvariable=self.workspace_title, bg=palette["card"], fg=palette["text"],
-                 font=("Segoe UI", 20, "bold")).pack(anchor="w", pady=(14, 0))
+                 font=("Segoe UI", 20, "bold")).pack(anchor="w", pady=(13, 0))
         tk.Label(title_box, text=_configured_school_name(), bg=palette["card"], fg=palette["muted"],
                  font=("Segoe UI", 9)).pack(anchor="w")
 
+        utilities = tk.Frame(header, bg=palette["card"])
+        utilities.pack(side="right", padx=18, pady=12)
+        ttk.Button(utilities, text="Backup", command=self._open_backup_window).pack(side="left", padx=3)
+        ttk.Button(utilities, text="Help", command=self._on_help_click).pack(side="left", padx=3)
+        ttk.Button(utilities, text="Password", command=self._on_change_password_click).pack(side="left", padx=3)
+        ttk.Button(utilities, text="Logout", command=self._on_logout_click).pack(side="left", padx=3)
+
         profile = tk.Frame(header, bg=palette["card"])
-        profile.pack(side="right", padx=26, pady=13)
+        profile.pack(side="right", padx=(4, 12), pady=13)
         username = auth.CURRENT_SESSION.username if auth.CURRENT_SESSION else "Guest"
         role = auth.CURRENT_SESSION.role.title() if auth.CURRENT_SESSION else "Not signed in"
         tk.Label(profile, text=username, bg=palette["card"], fg=palette["text"],
                  font=("Segoe UI", 10, "bold")).pack(anchor="e")
         tk.Label(profile, text=role, bg=palette["card"], fg=palette["muted"],
                  font=("Segoe UI", 8)).pack(anchor="e")
+
         year_box = tk.Frame(header, bg=palette["card"])
-        year_box.pack(side="right", padx=(0, 16), pady=13)
+        year_box.pack(side="right", padx=(0, 8), pady=13)
         tk.Label(year_box, text="Academic Year", bg=palette["card"], fg=palette["muted"],
                  font=("Segoe UI", 8, "bold")).pack(anchor="e")
         self.academic_year_var = tk.StringVar()
@@ -241,21 +173,78 @@ class DashboardWindow(tk.Toplevel):
         self.academic_year_combo.bind("<<ComboboxSelected>>", self._academic_year_changed)
         self._load_academic_years()
 
-        self.workspace = tk.Frame(main, bg=palette["page"])
+        self.workspace = tk.Frame(shell, bg=palette["page"])
         self.workspace.pack(fill="both", expand=True)
         self._show_dashboard()
 
     def _set_active_navigation(self, key: str) -> None:
-        """Highlight the active sidebar destination."""
-        palette = self._workspace_palette
+        """Track the active destination while navigation is driven by dashboard cards."""
         self._active_nav_key = key
-        for nav_key, button in self._nav_buttons.items():
-            active = nav_key == key
-            button.configure(
-                bg=palette["sidebar_active"] if active else palette["sidebar"],
-                fg=palette["accent"] if active else "white",
-                activeforeground=palette["accent"] if active else "white",
-            )
+        home = self._nav_buttons.get("dashboard")
+        if home is not None:
+            active = key == "dashboard"
+            home.configure(text="SFMS  •  Home" if active else "←  Dashboard")
+
+    def _module_groups(self) -> dict[str, dict]:
+        """Return the dashboard management areas and their permission-aware actions."""
+        return {
+            "fees": {
+                "title": "Fees Management", "icon": "₹", "color": "#5b3fc0",
+                "description": "Collections, dues, receipts, fee setup, discounts and reports.",
+                "items": (
+                    ("main_collection", "collect_main_fees", "Main Collection", "Collect regular school fees.", self._on_main_collection_click),
+                    ("small_collection", "collect_small_fees", "Small Collection", "Collect small-register fees.", self._on_small_collection_click),
+                    ("advance", "collect_advance_payments", "Advance Payment", "Record future-term payments.", self._on_advance_payment_click),
+                    ("dues", "view_dues", "Student Dues", "Search and print outstanding dues.", self._on_dues_click),
+                    ("dues_register", "view_dues", "Dues Register", "Chronological student financial history.", self._on_dues_register_click),
+                    ("cheques", "manage_cheques", "Cheque Management", "Clear, bounce or cancel cheques.", self._on_cheques_click),
+                    ("receipt_history", "view_receipts", "Receipt History", "View previous receipts.", self._on_receipt_history_click),
+                    ("reports", "view_reports", "Reports", "Daily, collection and dues reports.", self._on_reports_click),
+                    ("notices", "issue_fee_notices", "Fee Notices", "Generate fee notices.", self._on_fee_notices_click),
+                    ("fee_structure", "manage_fee_structure", "Fee Structures", "Configure fees and installments.", self._on_fee_structure_click),
+                    ("fee_heads", "manage_fee_heads", "Fee Heads", "Manage fee categories.", self._on_fee_heads_click),
+                    ("late_fees", "apply_late_fees", "Late Fees", "Assess overdue installment charges.", self._on_late_fees_click),
+                    ("discounts", "manage_discounts", "Discounts", "Apply audited fee discounts.", self._on_discount_click),
+                    ("exemptions", "manage_exemptions", "Exemptions", "Record fee exemptions.", self._on_exemption_click),
+                    ("exemption_collection", "collect_exemption_fees", "Exemption Collection", "Collect fees with approved exemptions.", self._on_exemption_collection_click),
+                    ("years", "manage_academic_years", "Academic Years", "Create and activate academic years.", self._on_academic_years_click),
+                    ("reprint", "reprint_receipts", "Receipt Reprint", "Controlled receipt reprinting.", self._on_receipt_reprint_click),
+                    ("void", "void_payments", "Void Payment", "Create an audited payment reversal.", self._on_void_payment_click),
+                ),
+            },
+            "cashbook": {
+                "title": "Cashbook Management", "icon": "▤", "color": "#247a63",
+                "description": "Income, expenses, vouchers, bank reconciliation and cash closing.",
+                "planned": ("Daily Cashbook", "Income & Expenses", "Payment Vouchers", "Bank Reconciliation", "Cash Closing"),
+            },
+            "timetable": {
+                "title": "Timetable Management", "icon": "▦", "color": "#3467b2",
+                "description": "Teacher setup, constraints, generation, editing and timetable exports.",
+                "items": (("timetable", "view_timetable", "Open Timetable", "Manage and generate the school timetable.", self._on_timetable_click),),
+            },
+            "students": {
+                "title": "Student Management", "icon": "◉", "color": "#b45d36",
+                "description": "Admissions, profiles, classes, certificates and student services.",
+                "items": (
+                    ("admissions", "manage_admissions", "New Admissions", "Admit students with one-time admission fees.", self._on_admissions_click),
+                    ("students", "manage_students", "Student Records", "Edit profiles, imports, promotion and ID cards.", self._on_students_click),
+                    ("student_tc", "manage_students", "Transfer Certificates", "Issue a TC after checking and clearing student dues.", self._on_students_click),
+                    ("student_view", "view_student_details", "View Student Details", "Read-only student profile search.", self._on_student_view_click),
+                    ("classes", "manage_classes", "Classes & Sections", "Maintain class and section masters.", self._on_classes_click),
+                ),
+                "planned": ("Conveyance Details Management",),
+            },
+            "exams": {
+                "title": "Exam Management", "icon": "✎", "color": "#8a4f9e",
+                "description": "Plan examinations, papers, seating and secure paper printing.",
+                "planned": ("Exam Timetable", "Paper Management", "Exam Seating Plan", "Paper Printing"),
+            },
+            "results": {
+                "title": "Result Management", "icon": "✓", "color": "#b08320",
+                "description": "Prepare marksheets and result diaries for parent meetings.",
+                "planned": ("Marksheet Generation", "Result Diary for PTMs"),
+            },
+        }
 
     def _clear_workspace(self) -> None:
         """Remove the current page before rendering the next destination."""
@@ -280,70 +269,171 @@ class DashboardWindow(tk.Toplevel):
             self._show_dashboard()
             raise
 
+    def _scrollable_workspace_page(self):
+        """Create a vertically scrollable page inside the workspace."""
+        palette = self._workspace_palette
+        container = tk.Frame(self.workspace, bg=palette["page"])
+        container.pack(fill="both", expand=True)
+        canvas = tk.Canvas(container, bg=palette["page"], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        page = tk.Frame(canvas, bg=palette["page"])
+        window = canvas.create_window((0, 0), window=page, anchor="nw")
+        page.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window, width=event.width))
+        return container, page
+
+    def _management_card(self, parent, column: int, group_key: str, group: dict) -> None:
+        """Render one large clickable management-area card."""
+        palette = self._workspace_palette
+        color = group["color"]
+        implemented = len(group.get("items", ()))
+        status = f"{implemented} available module{'s' if implemented != 1 else ''}" if implemented else "Planned"
+        card = tk.Frame(parent, bg=palette["card"], highlightthickness=1,
+                        highlightbackground=palette["border"], cursor="hand2")
+        card.grid(row=0, column=column, sticky="nsew", padx=7, pady=7)
+        accent = tk.Frame(card, bg=color, width=9)
+        accent.pack(side="left", fill="y")
+        body = tk.Frame(card, bg=palette["card"], cursor="hand2")
+        body.pack(side="left", fill="both", expand=True, padx=18, pady=16)
+        tk.Label(body, text=group["icon"], bg=palette["card"], fg=color,
+                 font=("Segoe UI", 24, "bold"), cursor="hand2").pack(anchor="w")
+        tk.Label(body, text=group["title"], bg=palette["card"], fg=palette["text"],
+                 font=("Segoe UI", 13, "bold"), cursor="hand2").pack(anchor="w", pady=(7, 3))
+        tk.Label(body, text=group["description"], bg=palette["card"], fg=palette["muted"],
+                 font=("Segoe UI", 9), justify="left", wraplength=260,
+                 cursor="hand2").pack(anchor="w")
+        tk.Label(body, text=f"{status}  →", bg=palette["card"], fg=color,
+                 font=("Segoe UI", 9, "bold"), cursor="hand2").pack(anchor="w", pady=(12, 0))
+        command = lambda: self._show_module_group(group_key)
+        for widget in (card, accent, body, *body.winfo_children()):
+            widget.bind("<Button-1>", lambda _event, action=command: action())
+        card.bind("<Enter>", lambda _event: card.configure(highlightbackground=color, highlightthickness=2))
+        card.bind("<Leave>", lambda _event: card.configure(highlightbackground=palette["border"], highlightthickness=1))
+
     def _show_dashboard(self) -> None:
-        """Render the dashboard overview cards, alerts, and cashflow chart."""
+        """Render the management-area launcher as the application's home screen."""
         self._clear_workspace()
         self.workspace_title.set("Dashboard")
         self._set_active_navigation("dashboard")
         palette = self._workspace_palette
-        page = tk.Frame(self.workspace, bg=palette["page"])
-        page.pack(fill="both", expand=True, padx=24, pady=20)
-        self._active_page = page
+        container, page = self._scrollable_workspace_page()
+        self._active_page = container
+        content = tk.Frame(page, bg=palette["page"])
+        content.pack(fill="both", expand=True, padx=26, pady=20)
 
-        welcome = tk.Frame(page, bg=palette["accent"], height=128)
-        welcome.pack(fill="x")
-        welcome.pack_propagate(False)
         username = auth.CURRENT_SESSION.username if auth.CURRENT_SESSION else "User"
-        tk.Label(welcome, text=f"Hello {username},", bg=palette["accent"], fg="#ffbd68",
-                 font=("Segoe UI", 16, "bold")).pack(anchor="w", padx=24, pady=(22, 2))
-        tk.Label(welcome, text="Manage students, fees, reports and school records from one workspace.",
-                 bg=palette["accent"], fg="white", font=("Segoe UI", 11)).pack(anchor="w", padx=24)
+        tk.Label(content, text=f"Welcome, {username}", bg=palette["page"], fg=palette["text"],
+                 font=("Segoe UI", 21, "bold")).pack(anchor="w")
+        tk.Label(content, text="Choose a management area to continue.", bg=palette["page"],
+                 fg=palette["muted"], font=("Segoe UI", 10)).pack(anchor="w", pady=(2, 10))
 
-        self.notification_frame = tk.Frame(page, bg=palette["page"], height=80)
-        self.notification_frame.pack(fill="x", pady=(12, 0))
+        self.notification_frame = tk.Frame(content, bg=palette["page"], height=78)
+        self.notification_frame.pack(fill="x")
         self.notification_frame.pack_propagate(False)
 
-        stats = tk.Frame(page, bg=palette["page"])
-        stats.pack(fill="x", pady=(4, 14))
+        groups = self._module_groups()
+        grid = tk.Frame(content, bg=palette["page"])
+        grid.pack(fill="x", pady=(2, 10))
+        keys = ("fees", "cashbook", "timetable", "students", "exams", "results")
+        for column in range(3):
+            grid.columnconfigure(column, weight=1, uniform="management")
+        for index, key in enumerate(keys):
+            row_frame = grid if index < 3 else getattr(self, "_second_management_row", None)
+            if index == 3:
+                row_frame = tk.Frame(content, bg=palette["page"])
+                row_frame.pack(fill="x", pady=(0, 10))
+                for column in range(3):
+                    row_frame.columnconfigure(column, weight=1, uniform="management2")
+                self._second_management_row = row_frame
+            elif index > 3:
+                row_frame = self._second_management_row
+            self._management_card(row_frame, index % 3, key, groups[key])
+
         summary = self._dashboard_summary()
+        stats = tk.Frame(content, bg=palette["page"])
+        stats.pack(fill="x", pady=(2, 12))
         for index, (label, value, color) in enumerate((
-            ("Total Students", summary["students"], "#e8f1ff"),
+            ("Active Students", summary["students"], "#e8f1ff"),
             ("Collected Today", format(summary["today"], ",.2f"), "#e5f7ec"),
             ("Outstanding Dues", format(summary["dues"], ",.2f"), "#fff0e3"),
             ("Pending Cheques", summary["cheques"], "#f4e8ff"),
         )):
-            card = tk.Frame(stats, bg=color, height=84)
+            card = tk.Frame(stats, bg=color, height=74)
             card.pack(side="left", fill="x", expand=True, padx=(0 if index == 0 else 8, 0))
             card.pack_propagate(False)
-            tk.Label(card, text=label, bg=color, fg=palette["muted"], font=("Segoe UI", 9)).pack(anchor="w", padx=16, pady=(14, 2))
-            tk.Label(card, text=str(value), bg=color, fg=palette["text"], font=("Segoe UI", 17, "bold")).pack(anchor="w", padx=16)
+            tk.Label(card, text=label, bg=color, fg=palette["muted"], font=("Segoe UI", 8)).pack(anchor="w", padx=14, pady=(11, 1))
+            tk.Label(card, text=str(value), bg=color, fg=palette["text"], font=("Segoe UI", 15, "bold")).pack(anchor="w", padx=14)
 
-        lower = tk.Frame(page, bg=palette["page"])
-        lower.pack(fill="both", expand=True)
-        chart_card = tk.Frame(lower, bg=palette["card"], highlightthickness=1, highlightbackground=palette["border"])
-        chart_card.pack(side="left", fill="both", expand=True, padx=(0, 10))
-        tk.Label(chart_card, text="Collection Overview", bg=palette["card"], fg=palette["text"],
-                 font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=18, pady=(14, 0))
-        self.cashflow_canvas = tk.Canvas(chart_card, bg=palette["card"], highlightthickness=0, height=260)
-        self.cashflow_canvas.pack(fill="both", expand=True, padx=12, pady=8)
-        self.cashflow_canvas.bind("<Configure>", self._draw_cashflow_chart)
-        side_card = tk.Frame(lower, bg=palette["card"], width=280, highlightthickness=1,
-                             highlightbackground=palette["border"])
-        side_card.pack(side="right", fill="y")
-        side_card.pack_propagate(False)
-        tk.Label(side_card, text="Backup Status", bg=palette["card"], fg=palette["text"],
-                 font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=18, pady=(16, 8))
-        self.backup_status_var = tk.StringVar(value="Last successful backup: loading...")
-        tk.Label(side_card, textvariable=self.backup_status_var, bg=palette["card"], fg=palette["muted"],
-                 wraplength=240, justify="left", anchor="w").pack(fill="x", padx=18)
-        ttk.Button(side_card, text="Backup Now", command=self._open_backup_window).pack(fill="x", padx=18, pady=14)
-        tk.Label(side_card, text="Quick Actions", bg=palette["card"], fg=palette["text"],
-                 font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=18, pady=(14, 8))
-        for text, command in (("Collect Fees", self._on_main_collection_click),
-                              ("Find Student", self._on_students_click),
-                              ("Generate Report", self._on_reports_click)):
-            ttk.Button(side_card, text=text, command=command).pack(fill="x", padx=18, pady=4)
+        administration = tk.LabelFrame(content, text="System & Administration", bg=palette["page"],
+                                       fg=palette["text"], font=("Segoe UI", 10, "bold"), padx=10, pady=10)
+        administration.pack(fill="x", pady=(0, 18))
+        actions = [("Backup & Restore", self._open_backup_window), ("Change Password", self._on_change_password_click),
+                   ("Help", self._on_help_click), ("About", self._on_about_click)]
+        if auth.has_permission("manage_academic_years"):
+            actions.append(("Academic Years", self._on_academic_years_click))
+        if auth.has_permission("view_audit_log"):
+            actions.append(("Audit Log", self._on_audit_log_click))
+        if auth.CURRENT_SESSION is not None and auth.CURRENT_SESSION.role == "ADMIN":
+            actions.extend((("Users", self._on_users_click), ("Accountant Permissions", self._on_permissions_click),
+                            ("Settings", self._on_settings_click)))
+        for text, command in actions:
+            ttk.Button(administration, text=text, command=command).pack(side="left", padx=4, pady=2)
         self._load_notifications_async()
+
+    def _show_module_group(self, group_key: str) -> None:
+        """Show the available and planned functions for one management area."""
+        group = self._module_groups()[group_key]
+        self._clear_workspace()
+        self.workspace_title.set(group["title"])
+        self._set_active_navigation(group_key)
+        palette = self._workspace_palette
+        container, page = self._scrollable_workspace_page()
+        self._active_page = container
+        content = tk.Frame(page, bg=palette["page"])
+        content.pack(fill="both", expand=True, padx=28, pady=22)
+        top = tk.Frame(content, bg=palette["page"])
+        top.pack(fill="x", pady=(0, 16))
+        ttk.Button(top, text="← Back to Dashboard", command=self._show_dashboard).pack(side="left")
+        tk.Label(top, text=group["title"], bg=palette["page"], fg=palette["text"],
+                 font=("Segoe UI", 21, "bold")).pack(side="left", padx=18)
+        tk.Label(content, text=group["description"], bg=palette["page"], fg=palette["muted"],
+                 font=("Segoe UI", 10)).pack(anchor="w", pady=(0, 12))
+
+        item_grid = tk.Frame(content, bg=palette["page"])
+        item_grid.pack(fill="x")
+        for column in range(3):
+            item_grid.columnconfigure(column, weight=1, uniform=f"{group_key}_items")
+        visible_items = [item for item in group.get("items", ()) if auth.has_permission(item[1])]
+        for index, (_key, _permission, title, description, command) in enumerate(visible_items):
+            self._module_action_card(item_grid, index, title, description, command, group["color"], False)
+        start = len(visible_items)
+        for offset, title in enumerate(group.get("planned", ())):
+            self._module_action_card(item_grid, start + offset, title, "Planned for a future release.", None,
+                                     group["color"], True)
+        if not visible_items and not group.get("planned"):
+            tk.Label(item_grid, text="No functions in this area are available for your account.",
+                     bg=palette["page"], fg=palette["muted"], font=("Segoe UI", 11)).grid(row=0, column=0, sticky="w", pady=20)
+
+    def _module_action_card(self, parent, index: int, title: str, description: str, command,
+                            color: str, planned: bool) -> None:
+        """Render an action card within a selected management area."""
+        palette = self._workspace_palette
+        card = tk.Frame(parent, bg=palette["card"], highlightthickness=1,
+                        highlightbackground=palette["border"], height=132)
+        card.grid(row=index // 3, column=index % 3, sticky="nsew", padx=7, pady=7)
+        card.grid_propagate(False)
+        tk.Label(card, text=title, bg=palette["card"], fg=palette["text"],
+                 font=("Segoe UI", 12, "bold"), anchor="w").pack(fill="x", padx=16, pady=(15, 3))
+        tk.Label(card, text=description, bg=palette["card"], fg=palette["muted"],
+                 font=("Segoe UI", 9), justify="left", wraplength=280, anchor="w").pack(fill="x", padx=16)
+        if planned:
+            tk.Label(card, text="PLANNED", bg="#eeeaf6", fg=color,
+                     font=("Segoe UI", 8, "bold"), padx=8, pady=3).pack(anchor="w", padx=16, pady=(10, 0))
+        else:
+            ttk.Button(card, text="Open Module →", command=command, style="Accent.TButton").pack(anchor="e", padx=14, pady=(8, 10))
 
     def _dashboard_summary(self) -> dict[str, float | int]:
         """Load compact dashboard statistics without changing financial records."""

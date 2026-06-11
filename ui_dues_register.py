@@ -15,12 +15,45 @@ from utils import format_currency
 
 
 def _date_key(value: str | None) -> datetime:
-    for fmt in ("%d-%m-%Y %H:%M:%S", "%d-%m-%Y", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+    """Parse every date format stored by current and legacy SFMS versions."""
+    text = str(value or "").strip()
+    for fmt in (
+        "%d-%m-%Y %H:%M:%S.%f", "%d-%m-%Y %H:%M:%S", "%d-%m-%Y",
+        "%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d",
+        "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S",
+    ):
         try:
-            return datetime.strptime(str(value or ""), fmt)
+            return datetime.strptime(text, fmt)
         except ValueError:
             continue
     return datetime.min
+
+
+def _event_time(display_date: str | None, created_at: str | None = None) -> datetime:
+    """Use the transaction date plus its creation time for stable chronology."""
+    displayed = _date_key(display_date)
+    created = _date_key(created_at)
+    if displayed == datetime.min:
+        return created
+    if created != datetime.min and displayed.time() == datetime.min.time():
+        return displayed.replace(hour=created.hour, minute=created.minute, second=created.second,
+                                 microsecond=created.microsecond)
+    return displayed
+
+
+def _display_event_date(display_date: str | None, created_at: str | None = None) -> str:
+    """Show same-day creation time when the stored transaction date has no time."""
+    displayed = _date_key(display_date)
+    created = _date_key(created_at)
+    if displayed != datetime.min and displayed.time() == datetime.min.time() and created != datetime.min:
+        return displayed.replace(hour=created.hour, minute=created.minute, second=created.second,
+                                 microsecond=created.microsecond).strftime("%d-%m-%Y %H:%M:%S")
+    return str(display_date or created_at or "")
+
+
+def _has_column(conn, table: str, column: str) -> bool:
+    """Return whether a current or legacy table exposes a column."""
+    return column in {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
 
 
 def student_dues_register(conn, student_id: int) -> dict:
@@ -38,34 +71,46 @@ def student_dues_register(conn, student_id: int) -> dict:
            WHERE c.student_id=? ORDER BY c.id""", (student_id,),
     ).fetchall()
     for row in charges:
-        events.append({"date": row["created_at"] or row["due_date"] or "", "type": "CHARGE",
+        event_date = row["created_at"] or row["due_date"] or ""
+        events.append({"date": event_date, "type": "CHARGE",
                        "reference": f"Charge #{row['id']}", "description": f"{row['fee_head']} (due {row['due_date'] or 'not set'})",
-                       "debit": float(row["original_amount"] or 0), "credit": 0.0})
+                       "debit": float(row["original_amount"] or 0), "credit": 0.0,
+                       "_sort_at": _event_time(event_date, row["created_at"]), "_sequence": (0, int(row["id"]))})
     adjustments = conn.execute(
         """SELECT a.id,a.amount,a.adjustment_type,a.reason,a.created_at,fh.name fee_head
            FROM charge_adjustments a JOIN student_charges c ON c.id=a.charge_id
            JOIN fee_heads fh ON fh.id=c.fee_head_id WHERE c.student_id=? ORDER BY a.id""", (student_id,),
     ).fetchall()
     for row in adjustments:
-        events.append({"date": row["created_at"] or "", "type": row["adjustment_type"],
+        event_date = row["created_at"] or ""
+        events.append({"date": event_date, "type": row["adjustment_type"],
                        "reference": f"Adjustment #{row['id']}",
                        "description": f"{row['fee_head']}: {row['reason'] or row['adjustment_type'].title()}",
-                       "debit": 0.0, "credit": float(row["amount"] or 0)})
+                       "debit": 0.0, "credit": float(row["amount"] or 0),
+                       "_sort_at": _event_time(event_date, row["created_at"]), "_sequence": (1, int(row["id"]))})
+    allocation_timestamp = "a.created_at" if _has_column(conn, "payment_allocations", "created_at") else "NULL"
     payments = conn.execute(
-        """SELECT p.id,p.receipt_no,p.payment_date,p.payment_mode,p.note,a.amount_allocated,
-                  a.allocation_type,fh.name fee_head
-           FROM payment_allocations a JOIN payments p ON p.id=a.payment_id
-           JOIN student_charges c ON c.id=a.charge_id JOIN fee_heads fh ON fh.id=c.fee_head_id
-           WHERE p.student_id=? ORDER BY p.id,a.id""", (student_id,),
+        f"""SELECT p.id,a.id allocation_id,p.receipt_no,p.payment_date,p.payment_mode,p.note,a.amount_allocated,
+                   a.allocation_type,fh.name fee_head,{allocation_timestamp} allocation_created_at
+            FROM payment_allocations a JOIN payments p ON p.id=a.payment_id
+            JOIN student_charges c ON c.id=a.charge_id JOIN fee_heads fh ON fh.id=c.fee_head_id
+            WHERE p.student_id=? ORDER BY p.id,a.id""", (student_id,),
     ).fetchall()
     for row in payments:
         reversal = row["allocation_type"] == "REVERSAL"
         amount = float(row["amount_allocated"] or 0)
-        events.append({"date": row["payment_date"] or "", "type": "VOID/REVERSAL" if reversal else "PAYMENT",
+        event_date = row["payment_date"] or row["allocation_created_at"] or ""
+        display_date = _display_event_date(event_date, row["allocation_created_at"])
+        events.append({"date": display_date, "type": "VOID/REVERSAL" if reversal else "PAYMENT",
                        "reference": row["receipt_no"] or f"Payment #{row['id']}",
                        "description": f"{row['fee_head']} • {row['payment_mode'] or ''}{' • ' + row['note'] if row['note'] else ''}",
-                       "debit": amount if reversal else 0.0, "credit": 0.0 if reversal else amount})
-    events.sort(key=lambda event: (_date_key(event["date"]), event["type"], event["reference"]))
+                       "debit": amount if reversal else 0.0, "credit": 0.0 if reversal else amount,
+                       "_sort_at": _event_time(event_date, row["allocation_created_at"]),
+                       "_sequence": (2, int(row["id"]), int(row["allocation_id"]))})
+    events.sort(key=lambda event: (event["_sort_at"], event["_sequence"]))
+    for event in events:
+        event.pop("_sort_at", None)
+        event.pop("_sequence", None)
     totals = {
         "charged": sum(event["debit"] for event in events if event["type"] == "CHARGE"),
         "paid": sum(event["credit"] for event in events if event["type"] == "PAYMENT"),

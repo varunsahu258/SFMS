@@ -42,13 +42,35 @@ def test_dashboard_routes_primary_modules_through_workspace_host():
     assert 'self._show_workspace_page(TimetableWindow, "Timetable", "timetable")' in source
 
 
-def test_dashboard_keeps_persistent_navigation_and_overview():
+def test_dashboard_uses_management_cards_instead_of_left_sidebar():
     import ui_dashboard
 
-    source = inspect.getsource(ui_dashboard.DashboardWindow._build_widgets)
-    assert "sidebar" in source
-    assert "self.workspace" in source
-    assert "Dashboard" in source
-    assert "Fee Collection" in source
-    assert "School Records" in source
-    assert "Administration" in source
+    build_source = inspect.getsource(ui_dashboard.DashboardWindow._build_widgets)
+    dashboard_source = inspect.getsource(ui_dashboard.DashboardWindow._show_dashboard)
+    groups_source = inspect.getsource(ui_dashboard.DashboardWindow._module_groups)
+    assert "self.workspace" in build_source
+    assert "sidebar.pack" not in build_source
+    assert "_management_card" in dashboard_source
+    for title in (
+        "Fees Management", "Cashbook Management", "Timetable Management",
+        "Student Management", "Exam Management", "Result Management",
+    ):
+        assert title in groups_source
+
+
+def test_management_groups_route_existing_modules_and_mark_future_modules_planned():
+    import ui_dashboard
+
+    source = inspect.getsource(ui_dashboard.DashboardWindow._module_groups)
+    for handler in (
+        "_on_main_collection_click", "_on_dues_register_click", "_on_reports_click",
+        "_on_admissions_click", "_on_students_click", "_on_classes_click",
+        "_on_timetable_click",
+    ):
+        assert handler in source
+    for planned in (
+        "Daily Cashbook", "Exam Timetable", "Paper Management",
+        "Marksheet Generation", "Result Diary for PTMs",
+        "Conveyance Details Management",
+    ):
+        assert planned in source

@@ -89,14 +89,14 @@ def _financial_register_db():
         CREATE TABLE payments(id INTEGER PRIMARY KEY,student_id INTEGER,receipt_no TEXT,payment_date TEXT,
           payment_mode TEXT,note TEXT,cheque_status TEXT,allocated_academic_year_id INTEGER,allocated_term TEXT);
         CREATE TABLE payment_allocations(id INTEGER PRIMARY KEY,payment_id INTEGER,charge_id INTEGER,
-          amount_allocated REAL,allocation_type TEXT);
+          amount_allocated REAL,allocation_type TEXT,created_at TEXT);
         INSERT INTO academic_years VALUES(1,'2026-27',1);
         INSERT INTO students VALUES(1,'S-1','Asha','Ramesh','Class 1','A','9999999999',1,'ACTIVE','01-04-2026 09:00:00');
         INSERT INTO fee_heads VALUES(1,'Tuition Fee','BIG',1,0);
         INSERT INTO student_charges VALUES(1,1,'2026-27',NULL,1,1000,'10-04-2026','OPEN','01-04-2026 09:00:00');
         INSERT INTO charge_adjustments VALUES(1,1,'DISCOUNT',100,'Sibling discount','05-04-2026 10:00:00');
         INSERT INTO payments VALUES(1,1,'R-001','06-04-2026','UPI','April payment','',NULL,NULL);
-        INSERT INTO payment_allocations VALUES(1,1,1,400,'PAYMENT');
+        INSERT INTO payment_allocations VALUES(1,1,1,400,'PAYMENT','06-04-2026 11:00:00');
     """)
     return conn
 
@@ -112,6 +112,27 @@ def test_student_dues_register_is_chronological_and_includes_receipts_discounts_
     assert register["totals"]["paid"] == 400
     assert register["totals"]["adjustments"] == 100
     assert register["totals"]["outstanding"] == Decimal("500")
+
+
+def test_dues_register_orders_same_day_events_by_creation_time_not_type_or_id():
+    from ui_dues_register import student_dues_register
+
+    conn = _financial_register_db()
+    conn.executescript("""
+        INSERT INTO payments VALUES(2,1,'R-LATE','01-06-2026','CASH','late entry','',NULL,NULL);
+        INSERT INTO payments VALUES(3,1,'R-EARLY','01-06-2026','CASH','early entry','',NULL,NULL);
+        INSERT INTO payment_allocations VALUES(2,2,1,50,'PAYMENT','01-06-2026 15:00:00');
+        INSERT INTO payment_allocations VALUES(3,3,1,50,'PAYMENT','01-06-2026 09:00:00');
+        INSERT INTO charge_adjustments VALUES(2,1,'DISCOUNT',25,'midday adjustment','01-06-2026 12:00:00');
+    """)
+
+    events = student_dues_register(conn, 1)["events"]
+    same_day = [event for event in events if event["date"].startswith("01-06-2026")]
+
+    assert [event["reference"] for event in same_day] == ["R-EARLY", "Adjustment #2", "R-LATE"]
+    assert [event["date"] for event in same_day] == [
+        "01-06-2026 09:00:00", "01-06-2026 12:00:00", "01-06-2026 15:00:00",
+    ]
 
 
 def test_new_admission_fee_is_a_one_time_student_charge(monkeypatch):
