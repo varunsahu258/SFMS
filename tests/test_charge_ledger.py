@@ -196,3 +196,45 @@ def test_regular_collection_helper_commits_receipt_and_allocation(monkeypatch):
     assert conn.execute("SELECT COUNT(*) FROM payments WHERE receipt_no=?", (result["receipt_no"],)).fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM receipts WHERE id=?", (result["receipt_id"],)).fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM audit_log WHERE action='PAYMENT_COLLECTED'").fetchone()[0] == 1
+
+
+def test_main_collection_uses_one_tuition_payment_and_allocates_overall_dues(monkeypatch):
+    import base64
+
+    from financial_operations import record_collection
+    from ui_collection_main import main_collection_summary
+
+    monkeypatch.setenv("SFMS_INTEGRITY_KEY", base64.urlsafe_b64encode(b"c" * 32).decode("ascii"))
+    conn = sqlite3.connect(":memory:")
+    schema(conn)
+    conn.execute("INSERT INTO fee_heads VALUES(2,'Annual Fee','BIG',1)")
+    conn.execute("INSERT INTO fee_structure VALUES(3,'2026-27','Class 1',2,3000,'15-06-2026')")
+    ensure_student_charges(conn, "2026-27", 1)
+
+    summary = main_collection_summary(conn, 1)
+    assert summary["total_due"] == 15000
+    assert summary["tuition_fee_head_id"] == 1
+
+    remaining = 5000
+    allocations = []
+    for charge in summary["charges"]:
+        amount = min(remaining, float(charge["balance"]))
+        if amount:
+            allocations.append({"charge_id": charge["charge_id"], "amount": amount})
+            remaining -= amount
+    result = record_collection(conn, 1, "BIG", 1, [{
+        "fee_head_id": 1, "charge_id": summary["charges"][0]["charge_id"],
+        "amount_due": summary["total_due"], "amount_paying": 5000,
+        "balance_after": 10000, "mode": "CASH", "academic_year": "2026-27",
+        "due_date": summary["oldest_due_date"], "note": "MAIN COLLECTION",
+        "allocations": allocations,
+    }])
+
+    payment = conn.execute(
+        "SELECT fee_head_id,amount_due,amount_paid,balance,note FROM payments WHERE receipt_no=?",
+        (result["receipt_no"],),
+    ).fetchone()
+    assert tuple(payment) == (1, 15000, 5000, 10000, "MAIN COLLECTION")
+    assert conn.execute(
+        "SELECT COUNT(*) FROM payment_allocations WHERE payment_id=?", (result["payment_ids"][0],)
+    ).fetchone()[0] == len(allocations)
