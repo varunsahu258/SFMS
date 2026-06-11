@@ -6,13 +6,13 @@ import os
 import platform
 import subprocess
 import sys
+import sqlite3
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
 
-import sqlite3
-
 from config import APP_VERSION, DB_PATH, SCHOOL_NAME
+from ui_theme import apply_theme
 
 
 class AboutDialog(tk.Toplevel):
@@ -20,6 +20,7 @@ class AboutDialog(tk.Toplevel):
 
     def __init__(self, master=None):
         super().__init__(master)
+        apply_theme(self)
         self.title("About SFMS")
         self.geometry("560x340")
         self.resizable(False, False)
