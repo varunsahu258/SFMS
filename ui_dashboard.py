@@ -409,55 +409,6 @@ class DashboardWindow(tk.Toplevel):
 
         self._show_workspace_page(ClassSectionWindow, "Classes & Sections", "classes")
 
-    def _load_academic_years(self) -> None:
-        """Populate the dashboard year selector and show the current active year."""
-        with sqlite3.connect(DB_PATH) as conn:
-            rows = conn.execute("SELECT label,is_active FROM academic_years ORDER BY start_date DESC,label DESC").fetchall()
-        labels = [str(row[0]) for row in rows]
-        active = next((str(row[0]) for row in rows if row[1]), labels[0] if labels else "")
-        self.academic_year_combo.configure(values=labels)
-        self.academic_year_var.set(active)
-
-    def _academic_year_changed(self, _event=None) -> None:
-        """Allow only an administrator to switch the application-wide academic year."""
-        if not auth.has_permission("manage_academic_years"):
-            messagebox.showerror(
-                "Access denied",
-                "You do not have permission to change the active academic year.",
-                parent=self,
-            )
-            self._load_academic_years()
-            return
-        auth.touch_session()
-        label = self.academic_year_var.get().strip()
-        if not label:
-            return
-        try:
-            from ledger import ensure_student_charges
-            from ui_master_utils import audit, connect_db
-
-            with connect_db() as conn:
-                selected = conn.execute("SELECT id FROM academic_years WHERE label=?", (label,)).fetchone()
-                if selected is None:
-                    raise ValueError("The selected academic year no longer exists.")
-                old = conn.execute("SELECT id,label FROM academic_years WHERE is_active=1 LIMIT 1").fetchone()
-                conn.execute("UPDATE academic_years SET is_active=0")
-                conn.execute("UPDATE academic_years SET is_active=1 WHERE id=?", (selected["id"],))
-                ensure_student_charges(conn, label)
-                audit(conn, "ACADEMIC_YEAR_SELECT", "academic_years", selected["id"], dict(old) if old else None, {"label": label})
-        except Exception as exc:
-            messagebox.showerror("Academic Year", str(exc), parent=self)
-            self._load_academic_years()
-            return
-        self._load_notifications_async()
-
-    @auth.require_permission("manage_classes")
-    def _on_classes_click(self) -> None:
-        auth.touch_session()
-        from ui_classes import ClassSectionWindow
-
-        ClassSectionWindow(self)
-
     def _bind_shortcuts(self) -> None:
         """Bind documented dashboard keyboard shortcuts to existing safe handlers."""
         self.bind("<F1>", lambda _event: self._on_main_collection_click())
@@ -790,13 +741,6 @@ class DashboardWindow(tk.Toplevel):
         from ui_permissions import AccountantPermissionsWindow
 
         self._show_workspace_page(AccountantPermissionsWindow, "Accountant Permissions", "permissions")
-
-    @auth.require_role("ADMIN")
-    def _on_permissions_click(self) -> None:
-        """Open per-accountant permission management."""
-        from ui_permissions import AccountantPermissionsWindow
-
-        AccountantPermissionsWindow(self)
 
     def _on_settings_click(self) -> None:
         """Open administrator settings."""

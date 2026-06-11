@@ -198,11 +198,11 @@ def test_regular_collection_helper_commits_receipt_and_allocation(monkeypatch):
     assert conn.execute("SELECT COUNT(*) FROM audit_log WHERE action='PAYMENT_COLLECTED'").fetchone()[0] == 1
 
 
-def test_main_collection_uses_one_tuition_payment_and_allocates_overall_dues(monkeypatch):
+def test_main_collection_records_only_explicitly_selected_fee_heads(monkeypatch):
     import base64
 
     from financial_operations import record_collection
-    from ui_collection_main import main_collection_summary
+    from ui_collection_main import main_collection_summary, selected_main_collection_items
 
     monkeypatch.setenv("SFMS_INTEGRITY_KEY", base64.urlsafe_b64encode(b"c" * 32).decode("ascii"))
     conn = sqlite3.connect(":memory:")
@@ -213,28 +213,38 @@ def test_main_collection_uses_one_tuition_payment_and_allocates_overall_dues(mon
 
     summary = main_collection_summary(conn, 1)
     assert summary["total_due"] == 15000
-    assert summary["tuition_fee_head_id"] == 1
+    assert {row["name"] for row in summary["charges"]} == {"Tuition", "Annual Fee"}
 
-    remaining = 5000
-    allocations = []
-    for charge in summary["charges"]:
-        amount = min(remaining, float(charge["balance"]))
-        if amount:
-            allocations.append({"charge_id": charge["charge_id"], "amount": amount})
-            remaining -= amount
-    result = record_collection(conn, 1, "BIG", 1, [{
-        "fee_head_id": 1, "charge_id": summary["charges"][0]["charge_id"],
-        "amount_due": summary["total_due"], "amount_paying": 5000,
-        "balance_after": 10000, "mode": "CASH", "academic_year": "2026-27",
-        "due_date": summary["oldest_due_date"], "note": "MAIN COLLECTION",
-        "allocations": allocations,
-    }])
+    annual = next(row for row in summary["charges"] if row["name"] == "Annual Fee")
+    items = selected_main_collection_items(
+        summary["charges"],
+        {annual["charge_id"]: True},
+        {annual["charge_id"]: "1250"},
+        "Cash",
+        9999999,
+    )
+    result = record_collection(conn, 1, "BIG", 1, items)
 
     payment = conn.execute(
         "SELECT fee_head_id,amount_due,amount_paid,balance,note FROM payments WHERE receipt_no=?",
         (result["receipt_no"],),
     ).fetchone()
-    assert tuple(payment) == (1, 15000, 5000, 10000, "MAIN COLLECTION")
-    assert conn.execute(
-        "SELECT COUNT(*) FROM payment_allocations WHERE payment_id=?", (result["payment_ids"][0],)
-    ).fetchone()[0] == len(allocations)
+    assert tuple(payment) == (2, 3000, 1250, 1750, "MAIN COLLECTION")
+    allocation = conn.execute(
+        "SELECT charge_id,amount_allocated FROM payment_allocations WHERE payment_id=?",
+        (result["payment_ids"][0],),
+    ).fetchone()
+    assert tuple(allocation) == (annual["charge_id"], 1250)
+
+
+def test_main_collection_requires_a_checkbox_selection():
+    import pytest
+
+    from ui_collection_main import selected_main_collection_items
+
+    charge = {
+        "charge_id": 1, "fee_head_id": 1, "name": "Tuition", "balance": 500,
+        "academic_year": "2026-27", "due_date": "01-04-2026",
+    }
+    with pytest.raises(ValueError, match="Select at least one fee head"):
+        selected_main_collection_items([charge], {}, {}, "Cash", 9999999)

@@ -223,12 +223,18 @@ def _draw_copy(
     pdf.setFont(FONT, 8.5)
 
     if main_collection:
-        fee_heads = data.get("all_fee_heads") or ["Tuition Fee"]
+        fee_heads = data.get("all_fee_heads") or [
+            str(payment.get("fee_head") or "Fee") for payment in data["payments"]
+        ]
+        paid_by_head: dict[str, float] = {}
+        for payment in data["payments"]:
+            head = str(payment.get("fee_head") or "Fee")
+            paid_by_head[head] = paid_by_head.get(head, 0.0) + float(payment.get("amount_paid") or 0)
         max_rows = max(1, int((height - 178) // 14))
         for fee_head in fee_heads[:max_rows]:
             pdf.drawString(col1, row_y, _fit_text(fee_head, width * 0.58, FONT, 8.5))
-            paid_text = format_currency(total_paid) if "tuition" in fee_head.casefold() else ""
-            pdf.drawRightString(col3, row_y, paid_text)
+            paid = paid_by_head.get(fee_head, 0.0)
+            pdf.drawRightString(col3, row_y, format_currency(paid) if paid else "")
             row_y -= 14
     else:
         max_rows = max(1, int((height - 178) // 14))
