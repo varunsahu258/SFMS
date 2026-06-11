@@ -196,3 +196,118 @@ def test_regular_collection_helper_commits_receipt_and_allocation(monkeypatch):
     assert conn.execute("SELECT COUNT(*) FROM payments WHERE receipt_no=?", (result["receipt_no"],)).fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM receipts WHERE id=?", (result["receipt_id"],)).fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM audit_log WHERE action='PAYMENT_COLLECTED'").fetchone()[0] == 1
+
+
+def test_main_collection_records_only_explicitly_selected_fee_heads(monkeypatch):
+    import base64
+
+    from financial_operations import record_collection
+    from ui_collection_main import main_collection_summary, selected_main_collection_items
+
+    monkeypatch.setenv("SFMS_INTEGRITY_KEY", base64.urlsafe_b64encode(b"c" * 32).decode("ascii"))
+    conn = sqlite3.connect(":memory:")
+    schema(conn)
+    conn.execute("INSERT INTO fee_heads VALUES(2,'Annual Fee','BIG',1)")
+    conn.execute("INSERT INTO fee_structure VALUES(3,'2026-27','Class 1',2,3000,'15-06-2026')")
+    ensure_student_charges(conn, "2026-27", 1)
+
+    summary = main_collection_summary(conn, 1)
+    assert summary["total_due"] == 15000
+    assert {row["name"] for row in summary["charges"]} == {"Tuition", "Annual Fee"}
+
+    annual = next(row for row in summary["charges"] if row["name"] == "Annual Fee")
+    items = selected_main_collection_items(
+        summary["charges"],
+        {annual["charge_id"]: True},
+        {annual["charge_id"]: "1250"},
+        "Cash",
+        9999999,
+    )
+    result = record_collection(conn, 1, "BIG", 1, items)
+
+    payment = conn.execute(
+        "SELECT fee_head_id,amount_due,amount_paid,balance,note FROM payments WHERE receipt_no=?",
+        (result["receipt_no"],),
+    ).fetchone()
+    assert tuple(payment) == (2, 3000, 1250, 1750, "MAIN COLLECTION")
+    allocation = conn.execute(
+        "SELECT charge_id,amount_allocated FROM payment_allocations WHERE payment_id=?",
+        (result["payment_ids"][0],),
+    ).fetchone()
+    assert tuple(allocation) == (annual["charge_id"], 1250)
+
+
+def test_main_collection_requires_a_checkbox_selection():
+    import pytest
+
+    from ui_collection_main import selected_main_collection_items
+
+    charge = {
+        "charge_id": 1, "fee_head_id": 1, "name": "Tuition", "balance": 500,
+        "academic_year": "2026-27", "due_date": "01-04-2026",
+    }
+    with pytest.raises(ValueError, match="Select at least one fee head"):
+        selected_main_collection_items([charge], {}, {}, "Cash", 9999999)
+
+
+def test_advance_payment_persists_upi_and_cheque_modes(monkeypatch):
+    import base64
+    from financial_operations import record_advance_payment
+
+    monkeypatch.setenv("SFMS_INTEGRITY_KEY", base64.urlsafe_b64encode(b"d" * 32).decode("ascii"))
+    conn = sqlite3.connect(":memory:")
+    schema(conn)
+    ensure_student_charges(conn, "2026-27", 1)
+    charge = charge_rows(conn, 1, "2026-27")[0]
+
+    upi = record_advance_payment(
+        conn, 1, charge["charge_id"], 1, 20, 2, "2026-27", "01-04-2026", 1,
+        "UPI", upi_reference="UPI-ADV-1",
+    )
+    upi_row = conn.execute(
+        "SELECT payment_mode,upi_reference,cheque_number FROM payments WHERE id=?",
+        (upi["payment_id"],),
+    ).fetchone()
+    assert tuple(upi_row) == ("UPI", "UPI-ADV-1", None)
+
+    cheque = record_advance_payment(
+        conn, 1, charge["charge_id"], 1, 15, 2, "2026-27", "01-04-2026", 1,
+        "CHEQUE", cheque_no="CH-42", bank="School Bank",
+    )
+    cheque_row = conn.execute(
+        "SELECT payment_mode,cheque_number,cheque_status FROM payments WHERE id=?",
+        (cheque["payment_id"],),
+    ).fetchone()
+    assert tuple(cheque_row) == ("CHEQUE", "CH-42", "PENDING")
+    tracker = conn.execute(
+        "SELECT cheque_no,bank,status FROM cheque_tracker WHERE payment_id=?",
+        (cheque["payment_id"],),
+    ).fetchone()
+    assert tuple(tracker) == ("CH-42", "School Bank", "PENDING")
+
+
+def test_one_time_admission_head_is_not_generated_from_class_fee_structure():
+    conn = sqlite3.connect(":memory:")
+    schema(conn)
+    conn.execute("ALTER TABLE fee_heads ADD COLUMN is_one_time INTEGER NOT NULL DEFAULT 0")
+    conn.execute("INSERT INTO fee_heads(id,name,register_type,is_active,is_one_time) VALUES(2,'Admission Fee','BIG',1,1)")
+    conn.execute("INSERT INTO fee_structure(id,academic_year,class,fee_head_id,amount,due_date) VALUES(20,'2026-27','1',2,500,'01-04-2026')")
+
+    ensure_student_charges(conn, "2026-27", 1)
+
+    assert conn.execute("SELECT COUNT(*) FROM student_charges WHERE fee_head_id=2").fetchone()[0] == 0
+
+
+def test_discount_spans_multiple_charges_and_reduces_derived_due():
+    from ui_discount import apply_discount
+
+    conn = sqlite3.connect(":memory:")
+    schema(conn)
+    conn.execute("INSERT INTO fee_structure VALUES(20,'2026-27','Class 1',1,3000,'01-09-2026')")
+    ensure_student_charges(conn, "2026-27", 1)
+
+    ids = apply_discount(conn, 1, 1, "13000", "Scholarship", 1, "2026-27")
+
+    assert len(ids) == 2
+    assert conn.execute("SELECT SUM(amount) FROM discounts").fetchone()[0] == 13000
+    assert sum(float(row["balance"]) for row in charge_rows(conn, 1, "2026-27")) == 2000

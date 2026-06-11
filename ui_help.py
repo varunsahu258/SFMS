@@ -10,15 +10,17 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import ttk
 
+from ui_workspace import WorkspacePage
+
 HELP_FILE = Path(__file__).resolve().parent / "assets" / "help" / "index.html"
 SECTIONS = (("Getting Started", "getting-started"), ("Collections", "collections"), ("Reports", "reports"), ("Backups", "backups"), ("Security", "security"), ("Shortcuts", "shortcuts"))
 
 
-class HelpWindow(tk.Toplevel):
+class HelpWindow(WorkspacePage):
     """Display bundled HTML help, with a Text fallback when tkinterweb is absent."""
 
-    def __init__(self, master=None):
-        super().__init__(master)
+    def __init__(self, master=None, *, embedded: bool = False):
+        super().__init__(master, embedded=embedded)
         self.title("SFMS Help")
         self.geometry("1000x700")
         self.search_var = tk.StringVar()
