@@ -11,6 +11,7 @@ from tkinter import messagebox, ttk
 
 import auth
 from ui_workspace import WorkspacePage
+from ui_date import DateEntry
 from config import DB_PATH, REPORTS_DIR, SPLASH_BG, SPLASH_FG
 from report_generator import (
     audit_export,
@@ -170,7 +171,7 @@ class ReportsWindow(WorkspacePage):
         report_date = tk.StringVar(value=today_str())
         recipient = tk.StringVar()
         date_holder = self._row(frame, "Report Date (DD-MM-YYYY)", 0)
-        ttk.Entry(date_holder, textvariable=report_date, width=28).pack(side="left")
+        DateEntry(date_holder, textvariable=report_date, width=22).pack(side="left")
         mode_vars = self._collection_mode_controls(frame, 1)
         recipient_holder = self._row(frame, "Person Collecting Report", 2)
         ttk.Entry(recipient_holder, textvariable=recipient, width=72).pack(side="left")
@@ -211,10 +212,10 @@ class ReportsWindow(WorkspacePage):
             ttk.Radiobutton(type_holder, text=text, value=value, variable=report_type).pack(side="left", padx=(0, 14))
 
         from_holder = self._row(frame, "From Date (DD-MM-YYYY)", 1)
-        from_entry = ttk.Entry(from_holder, textvariable=from_var, width=28, state="disabled")
+        from_entry = DateEntry(from_holder, textvariable=from_var, width=22, state="disabled")
         from_entry.pack(side="left")
         to_holder = self._row(frame, "To Date (DD-MM-YYYY)", 2)
-        to_entry = ttk.Entry(to_holder, textvariable=to_var, width=28, state="disabled")
+        to_entry = DateEntry(to_holder, textvariable=to_var, width=22, state="disabled")
         to_entry.pack(side="left")
         mode_vars = self._collection_mode_controls(frame, 3)
 
@@ -343,7 +344,10 @@ class ReportsWindow(WorkspacePage):
         ttk.Combobox(user_holder, textvariable=user_var, values=[""] + list(self.users), state="readonly", width=25).pack(side="left")
         for row, label, variable in ((1, "Action", action_var), (2, "Table", table_var), (3, "Date From", from_var), (4, "Date To", to_var)):
             holder = self._row(frame, label, row)
-            ttk.Entry(holder, textvariable=variable, width=28).pack(side="left")
+            if label.startswith("Date"):
+                DateEntry(holder, textvariable=variable, width=22).pack(side="left")
+            else:
+                ttk.Entry(holder, textvariable=variable, width=28).pack(side="left")
         tamper_holder = self._row(frame, "Tamper Only", 5)
         ttk.Combobox(tamper_holder, textvariable=tamper_var, values=("", "Yes", "No"), state="readonly", width=25).pack(side="left")
 

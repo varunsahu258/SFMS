@@ -8,6 +8,7 @@ from tkinter import messagebox, ttk
 
 import auth
 from ui_workspace import WorkspacePage
+from ui_date import DateEntry
 from config import DB_PATH
 from payment_controls import list_pending_cheques, set_cheque_status
 from utils import format_currency, today_str
@@ -48,7 +49,7 @@ class ChequeManagementWindow(WorkspacePage):
         form = ttk.Frame(self)
         form.pack(fill="x", padx=12, pady=(0, 12))
         ttk.Label(form, text="Cleared Date").pack(side="left")
-        ttk.Entry(form, textvariable=self.cleared_date_var, width=12).pack(side="left", padx=5)
+        DateEntry(form, textvariable=self.cleared_date_var, width=12).pack(side="left", padx=5)
         ttk.Label(form, text="Bank Reference").pack(side="left", padx=(12, 0))
         ttk.Entry(form, textvariable=self.bank_ref_var, width=24).pack(side="left", padx=5)
         ttk.Button(form, text="Mark Cleared", command=lambda: self._change("CLEARED")).pack(side="left", padx=4)

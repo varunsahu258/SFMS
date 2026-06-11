@@ -53,3 +53,23 @@ def test_receipt_issuer_setting_migration_adds_default():
     assert conn.execute(
         "SELECT value FROM settings WHERE key='receipt_issuer_name'"
     ).fetchone()[0] == "Sonali Sahu"
+
+
+def test_admission_migration_marks_admission_heads_one_time_and_removes_class_assignment():
+    from migrations import migration_v014_admissions
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript("""
+        CREATE TABLE users(id INTEGER PRIMARY KEY);
+        CREATE TABLE students(id INTEGER PRIMARY KEY);
+        CREATE TABLE student_charges(id INTEGER PRIMARY KEY);
+        CREATE TABLE fee_heads(id INTEGER PRIMARY KEY,name TEXT);
+        CREATE TABLE fee_structure(id INTEGER PRIMARY KEY,fee_head_id INTEGER);
+        INSERT INTO fee_heads VALUES(1,'Admission Fee');
+        INSERT INTO fee_structure VALUES(1,1);
+    """)
+    migration_v014_admissions(conn)
+    migration_v014_admissions(conn)
+    assert conn.execute("SELECT is_one_time FROM fee_heads WHERE id=1").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM fee_structure").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM admissions").fetchone()[0] == 0

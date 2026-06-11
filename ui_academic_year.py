@@ -7,6 +7,7 @@ from tkinter import messagebox, ttk
 
 import auth
 from ui_workspace import WorkspacePage
+from ui_date import DateEntry
 from config import SPLASH_BG, SPLASH_FG
 from ledger import ensure_student_charges
 from ui_master_utils import audit, connect_db, ensure_permission_write
@@ -41,7 +42,10 @@ class AcademicYearWindow(WorkspacePage):
         form.pack(fill="x", padx=12, pady=(0, 12))
         for label, var in (("Label", self.label_var), ("Start", self.start_var), ("End", self.end_var)):
             tk.Label(form, text=label, bg=SPLASH_BG, fg=SPLASH_FG).pack(side="left")
-            ttk.Entry(form, textvariable=var, width=12).pack(side="left", padx=5)
+            if label == "Label":
+                ttk.Entry(form, textvariable=var, width=12).pack(side="left", padx=5)
+            else:
+                DateEntry(form, textvariable=var, width=12).pack(side="left", padx=5)
         ttk.Button(form, text="Add New", command=self.add_year).pack(side="left", padx=5)
         ttk.Button(form, text="Set Active", command=self.set_active).pack(side="left", padx=5)
         ttk.Button(form, text="Delete", command=self.delete_year).pack(side="left", padx=5)

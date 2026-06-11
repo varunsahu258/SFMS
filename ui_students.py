@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from ui_theme import apply_theme
+from ui_date import DateEntry
 
 import auth
 from ui_workspace import WorkspacePage
@@ -537,6 +538,8 @@ class StudentDialog(tk.Toplevel):
                 widget = ttk.Combobox(frame, textvariable=self.vars[key], values=("Male", "Female", "Other"), state="readonly", width=24)
             elif key == "category":
                 widget = ttk.Combobox(frame, textvariable=self.vars[key], values=("OBC", "SC", "ST", "General"), state="readonly", width=24)
+            elif key in {"dob", "admission_date"}:
+                widget = DateEntry(frame, textvariable=self.vars[key], width=21)
             else:
                 widget = ttk.Entry(frame, textvariable=self.vars[key], width=27)
             widget.grid(row=row, column=column + 1, sticky="ew", padx=(0, 16), pady=6)

@@ -11,6 +11,7 @@ import auth
 from ledger import active_academic_year
 from ui_master_utils import audit, connect_db
 from ui_workspace import WorkspacePage
+from ui_date import DateEntry
 from utils import now_str, today_str
 
 
@@ -93,7 +94,8 @@ class LateFeeWindow(WorkspacePage):
         for label, variable, width in (("Amount", self.amount_var, 14), ("Due date", self.due_date_var, 16),
                                        ("Reason", self.reason_var, 30)):
             ttk.Label(form, text=label).pack(side="left", padx=(0, 4))
-            ttk.Entry(form, textvariable=variable, width=width).pack(side="left", padx=(0, 12))
+            widget = DateEntry(form, textvariable=variable, width=width) if label == "Due date" else ttk.Entry(form, textvariable=variable, width=width)
+            widget.pack(side="left", padx=(0, 12))
         ttk.Combobox(form, textvariable=self.register_var, values=("Main Register", "Small Register"),
                      state="readonly", width=16).pack(side="left", padx=(0, 12))
         ttk.Button(form, text="Apply to Selected Students", command=self.apply,

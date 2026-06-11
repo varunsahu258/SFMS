@@ -24,6 +24,7 @@ PERMISSIONS: tuple[PermissionDefinition, ...] = (
     PermissionDefinition("view_receipts", "Search and view past receipts", "Students and Documents", True),
     PermissionDefinition("view_student_details", "Search and view student details (read-only)", "Students and Documents", True),
     PermissionDefinition("manage_students", "Manage students, imports, promotion, ID cards, and TC", "Students and Documents", True),
+    PermissionDefinition("manage_admissions", "Create new admissions and one-time admission fees", "Students and Documents", True),
     PermissionDefinition("manage_classes", "Manage classes and sections", "Students and Documents", True),
     PermissionDefinition("view_reports", "Open reports and generate report files", "Reports and Notices", True),
     PermissionDefinition("issue_fee_notices", "Generate fee notices", "Reports and Notices"),

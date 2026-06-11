@@ -29,7 +29,7 @@ class StudentViewWindow(WorkspacePage):
         entry.bind("<KeyRelease>", lambda _event: self.search())
         ttk.Button(top, text="Search", command=self.search, style="Accent.TButton").pack(side="left", padx=8)
         body = ttk.Frame(page); body.pack(fill="both", expand=True, pady=12)
-        self.tree = ttk.Treeview(body, columns=("scholar", "name", "class", "father", "phone"), show="headings", width=420)
+        self.tree = ttk.Treeview(body, columns=("scholar", "name", "class", "father", "phone"), show="headings")
         for col, title, width in (("scholar", "Scholar No.", 95), ("name", "Student", 180),
                                   ("class", "Class", 90), ("father", "Father", 170), ("phone", "Mobile", 105)):
             self.tree.heading(col, text=title); self.tree.column(col, width=width, anchor="w")

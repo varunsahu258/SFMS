@@ -436,6 +436,37 @@ def migration_v013_late_fees(conn: sqlite3.Connection) -> None:
     )
 
 
+def migration_v014_admissions(conn: sqlite3.Connection) -> None:
+    """Track new admissions and keep admission-only heads out of class structures."""
+    fee_head_columns = {row[1] for row in conn.execute("PRAGMA table_info(fee_heads)")}
+    if "is_one_time" not in fee_head_columns:
+        conn.execute("ALTER TABLE fee_heads ADD COLUMN is_one_time INTEGER NOT NULL DEFAULT 0")
+    conn.execute(
+        "UPDATE fee_heads SET is_one_time=1 WHERE LOWER(TRIM(name)) LIKE 'admission fee%'"
+    )
+    conn.execute(
+        "DELETE FROM fee_structure WHERE fee_head_id IN "
+        "(SELECT id FROM fee_heads WHERE is_one_time=1)"
+    )
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS admissions(
+            id INTEGER PRIMARY KEY,
+            student_id INTEGER NOT NULL UNIQUE,
+            charge_id INTEGER,
+            admission_fee REAL NOT NULL DEFAULT 0 CHECK(admission_fee >= 0),
+            register_type TEXT NOT NULL DEFAULT 'BIG' CHECK(register_type IN ('BIG','SMALL')),
+            admitted_at TEXT NOT NULL,
+            admitted_by INTEGER,
+            FOREIGN KEY(student_id) REFERENCES students(id),
+            FOREIGN KEY(charge_id) REFERENCES student_charges(id),
+            FOREIGN KEY(admitted_by) REFERENCES users(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_admissions_date ON admissions(admitted_at);
+        """
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     ("v001_base_settings", migration_v001_base_settings),
     ("v002_setup_defaults", migration_v002_setup_defaults),
@@ -450,6 +481,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     ("v011_receipt_issuer_setting", migration_v011_receipt_issuer_setting),
     ("v012_timetable", migration_v012_timetable),
     ("v013_late_fees", migration_v013_late_fees),
+    ("v014_admissions", migration_v014_admissions),
 )
 
 

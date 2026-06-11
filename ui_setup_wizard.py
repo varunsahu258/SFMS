@@ -15,6 +15,7 @@ import auth
 from audit import log_action
 from config import DB_PATH
 from ui_theme import apply_theme
+from ui_date import DateEntry
 
 
 def setup_is_complete() -> bool:
@@ -141,7 +142,7 @@ class SetupWizardWindow(tk.Toplevel):
         self._title("Academic Year", "Enter dates as DD-MM-YYYY.")
         for title, variable in (("Label (for example 2026-27)", self.year_label), ("Start date", self.start_date), ("End date", self.end_date)):
             ttk.Label(self.content, text=title).pack(anchor="w")
-            ttk.Entry(self.content, textvariable=variable, width=30).pack(anchor="w", pady=(3, 10))
+            DateEntry(self.content, textvariable=variable, width=24).pack(anchor="w", pady=(3, 10))
 
     def _complete(self) -> None:
         self._title("Setup Ready", "Review the information below. Setup cannot be skipped.")

@@ -123,7 +123,8 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             id INTEGER PRIMARY KEY,
             name TEXT,
             register_type TEXT CHECK(register_type IN ('{REGISTER_BIG}','{REGISTER_SMALL}','{REGISTER_BOTH}')),
-            is_active INT DEFAULT 1
+            is_active INT DEFAULT 1,
+            is_one_time INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS fee_structure (

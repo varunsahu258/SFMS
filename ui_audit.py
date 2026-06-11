@@ -10,6 +10,7 @@ from tkinter import messagebox, ttk
 
 import auth
 from ui_workspace import WorkspacePage
+from ui_date import DateEntry
 from config import DB_PATH, SPLASH_BG, SPLASH_FG
 from report_generator import audit_export
 
@@ -67,7 +68,7 @@ class AuditLogWindow(WorkspacePage):
             ("Date To", self.date_to_var, 13),
         ):
             tk.Label(filters, text=label, bg=SPLASH_BG, fg=SPLASH_FG).pack(side="left", padx=(6, 2))
-            ttk.Entry(filters, textvariable=variable, width=width).pack(side="left")
+            DateEntry(filters, textvariable=variable, width=width).pack(side="left")
         tk.Label(filters, text="Username", bg=SPLASH_BG, fg=SPLASH_FG).pack(side="left", padx=(10, 2))
         self.user_combo = ttk.Combobox(filters, textvariable=self.username_var, state="readonly", width=16)
         self.user_combo.pack(side="left")

@@ -166,12 +166,14 @@ class DashboardWindow(tk.Toplevel):
             ("small_collection", "collect_small_fees", "Small Collection", self._on_small_collection_click, "₹"),
             ("advance", "collect_advance_payments", "Advance Payment", self._on_advance_payment_click, "+"),
             ("dues", "view_dues", "Student Dues", self._on_dues_click, "◷"),
+            ("dues_register", "view_dues", "Dues Register", self._on_dues_register_click, "▤"),
             ("cheques", "manage_cheques", "Cheque Management", self._on_cheques_click, "▤"),
         ):
             if auth.has_permission(permission):
                 nav_item(key, text, command, symbol)
         section("School Records")
         for key, permission, text, command, symbol in (
+            ("admissions", "manage_admissions", "New Admissions", self._on_admissions_click, "+"),
             ("students", "manage_students", "Students", self._on_students_click, "♟"),
             ("student_view", "view_student_details", "View Student Details", self._on_student_view_click, "◉"),
             ("receipt_history", "view_receipts", "Receipt History", self._on_receipt_history_click, "⌕"),
@@ -641,6 +643,22 @@ class DashboardWindow(tk.Toplevel):
         from ui_exemption_record import ExemptionWindow
 
         self._show_workspace_page(ExemptionWindow, "Exemptions", "exemptions")
+
+    @auth.require_permission("manage_admissions")
+    def _on_admissions_click(self) -> None:
+        """Open the dedicated new-admission workflow."""
+        auth.touch_session()
+        from ui_admissions import AdmissionsWindow
+
+        self._show_workspace_page(AdmissionsWindow, "New Admissions", "admissions")
+
+    @auth.require_permission("view_dues")
+    def _on_dues_register_click(self) -> None:
+        """Open the chronological student dues register."""
+        auth.touch_session()
+        from ui_dues_register import DuesRegisterWindow
+
+        self._show_workspace_page(DuesRegisterWindow, "Dues Register", "dues_register")
 
     @auth.require_permission("manage_students")
     def _on_students_click(self) -> None:
