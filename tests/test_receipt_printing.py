@@ -133,3 +133,39 @@ def test_main_collection_receipt_data_keeps_one_payment_and_all_fee_heads(tmp_pa
         receipt_printer._open_pdf = original_open
     assert path.exists()
     assert path.stat().st_size > 0
+
+
+def test_receipt_uses_total_student_outstanding_and_earliest_due_date():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        "CREATE TABLE charge_ledger("
+        "student_id INTEGER,fee_head_id INTEGER,balance REAL,due_date TEXT,status TEXT)"
+    )
+    conn.executemany(
+        "INSERT INTO charge_ledger VALUES(?,?,?,?,?)",
+        (
+            (1, 1, 125, "01-07-2026", "OPEN"),
+            (1, 2, 275, "15-06-2026", "OPEN"),
+            (1, 3, 500, "01-06-2026", "CANCELLED"),
+            (2, 1, 900, "01-05-2026", "OPEN"),
+        ),
+    )
+
+    balance, due_date = receipt_printer._outstanding_summary(
+        conn, 1, [{"balance": 125}]
+    )
+
+    assert balance == 400
+    assert due_date == "15-06-2026"
+
+
+def test_receipt_due_lines_show_balance_then_date_then_late_fee_note():
+    lines = receipt_printer._receipt_due_lines(
+        {"overall_balance": 400, "overall_due_date": "15-06-2026"}
+    )
+
+    assert lines == [
+        "Total Outstanding Balance: Rs. 400.00",
+        "Due Date: 15-06-2026",
+        receipt_printer.LATE_FEE_NOTICE,
+    ]

@@ -30,10 +30,12 @@ def test_receipt_uses_whole_student_balance_not_only_paid_heads():
     import receipt_printer
 
     source = inspect.getsource(receipt_printer._receipt_data)
+    summary_source = inspect.getsource(receipt_printer._outstanding_summary)
     draw_source = inspect.getsource(receipt_printer._draw_copy)
-    assert 'SUM(balance)' in source
-    assert 'overall_due_before_payment' in source
-    assert 'data.get("overall_balance")' in draw_source
+    assert "_outstanding_summary" in source
+    assert 'conditions = ["student_id=?", "balance>0"]' in summary_source
+    assert 'receipt_values["overall_due_date"]' in source
+    assert "_receipt_due_lines(data)" in draw_source
 
 
 def test_late_fee_migration_and_assessment_create_separate_charge(monkeypatch):

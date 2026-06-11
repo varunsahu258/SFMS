@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 import qrcode
@@ -23,11 +24,64 @@ MARGIN = 20 * 72 / 25.4
 FONT = "Helvetica"
 FONT_BOLD = "Helvetica-Bold"
 WATERMARK_COLOR = colors.HexColor("#cccccc")
+LATE_FEE_NOTICE = "Note: Late fees will apply if dues are not cleared by the due date."
 
 
 def _settings(conn) -> dict[str, str]:
     """Return application settings as a key/value dictionary."""
     return {str(row[0]): str(row[1] or "") for row in conn.execute("SELECT key, value FROM settings")}
+
+
+def _parse_due_date(value: object) -> datetime | None:
+    """Parse the date formats used by charge and installment records."""
+    text = str(value or "").strip()
+    for date_format in ("%d-%m-%Y", "%Y-%m-%d", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(text, date_format)
+        except ValueError:
+            continue
+    return None
+
+
+def _outstanding_summary(conn, student_id: int, payments: list[dict]) -> tuple[float, str]:
+    """Return total positive dues and their earliest due date across every fee head."""
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table','view')")}
+    ledger_columns = (
+        {row[1] for row in conn.execute("PRAGMA table_info(charge_ledger)")}
+        if "charge_ledger" in tables else set()
+    )
+    if {"student_id", "balance"}.issubset(ledger_columns):
+        selected = ["balance"]
+        if "due_date" in ledger_columns:
+            selected.append("due_date")
+        else:
+            selected.append("NULL AS due_date")
+        conditions = ["student_id=?", "balance>0"]
+        if "status" in ledger_columns:
+            conditions.append("COALESCE(status,'OPEN')<>'CANCELLED'")
+        rows = conn.execute(
+            f"SELECT {','.join(selected)} FROM charge_ledger WHERE {' AND '.join(conditions)}",
+            (student_id,),
+        ).fetchall()
+        total = sum(float(row[0] or 0) for row in rows)
+        dated = [(parsed, str(row[1])) for row in rows if (parsed := _parse_due_date(row[1]))]
+        earliest_due = min(dated, key=lambda item: item[0])[1] if dated else ""
+        return total, earliest_due
+
+    # Compatibility fallback for legacy databases that predate the student-aware ledger view.
+    return sum(max(float(payment.get("balance") or 0), 0) for payment in payments), ""
+
+
+def _receipt_due_lines(data: dict) -> list[str]:
+    """Build the requested balance, due-date, and late-fee lines in display order."""
+    balance = float(data.get("overall_balance") or 0)
+    if balance <= 0:
+        return []
+    lines = [f"Total Outstanding Balance: {format_currency(balance)}"]
+    due_date = str(data.get("overall_due_date") or "").strip()
+    if due_date:
+        lines.extend((f"Due Date: {due_date}", LATE_FEE_NOTICE))
+    return lines
 
 
 def _receipt_data(conn, receipt_no: str) -> dict:
@@ -107,17 +161,11 @@ def _receipt_data(conn, receipt_no: str) -> dict:
     receipt_values["all_fee_heads"] = [
         str(row[0]) for row in conn.execute(f"SELECT name FROM fee_heads{where_clause} ORDER BY id")
     ] if "fee_heads" in tables_available else []
-    ledger_columns = {row[1] for row in conn.execute("PRAGMA table_info(charge_ledger)")} if "charge_ledger" in tables_available else set()
-    if "student_id" in ledger_columns:
-        overall_balance = float(conn.execute(
-            "SELECT COALESCE(SUM(balance),0) FROM charge_ledger WHERE student_id=? AND balance>0",
-            (receipt_values["student_id"],),
-        ).fetchone()[0] or 0)
-    else:
-        overall_balance = sum(float(payment.get("balance") or 0) for payment in payments)
-    receipt_total = sum(float(payment.get("amount_paid") or 0) for payment in payments)
+    overall_balance, overall_due_date = _outstanding_summary(
+        conn, int(receipt_values["student_id"]), payments
+    )
     receipt_values["overall_balance"] = overall_balance
-    receipt_values["overall_due_before_payment"] = overall_balance + receipt_total
+    receipt_values["overall_due_date"] = overall_due_date
     return receipt_values
 
 
@@ -229,9 +277,6 @@ def _draw_copy(
 
     row_y = table_top - 26
     total_paid = sum(float(payment.get("amount_paid") or 0) for payment in data["payments"])
-    total_due = float(data.get("overall_due_before_payment") or 0)
-    total_balance = float(data.get("overall_balance") or 0)
-    due_date = next((str(payment.get("allocated_term") or "") for payment in data["payments"] if payment.get("allocated_term")), "")
     pdf.setFont(FONT, 8.5)
 
     if explicit_collection:
@@ -242,14 +287,14 @@ def _draw_copy(
         for payment in data["payments"]:
             head = str(payment.get("fee_head") or "Fee")
             paid_by_head[head] = paid_by_head.get(head, 0.0) + float(payment.get("amount_paid") or 0)
-        max_rows = max(1, int((height - 178) // 14))
+        max_rows = max(1, int((height - 220) // 14))
         for fee_head in fee_heads[:max_rows]:
             pdf.drawString(col1, row_y, _fit_text(fee_head, width * 0.58, FONT, 8.5))
             paid = paid_by_head.get(fee_head, 0.0)
             pdf.drawRightString(col3, row_y, format_currency(paid) if paid else "")
             row_y -= 14
     else:
-        max_rows = max(1, int((height - 178) // 14))
+        max_rows = max(1, int((height - 220) // 14))
         for payment in data["payments"][:max_rows]:
             due = float(payment.get("amount_due") or 0)
             paid = float(payment.get("amount_paid") or 0)
@@ -263,22 +308,26 @@ def _draw_copy(
     pdf.drawString(col1, row_y - 7, "TOTAL PAID")
     pdf.drawRightString(col3, row_y - 7, format_currency(total_paid))
 
+    due_lines = _receipt_due_lines(data)
+    for line_index, line in enumerate(due_lines):
+        font_name = FONT_BOLD if line_index == 0 else FONT
+        font_size = 8.2 if line_index < 2 else 7.2
+        pdf.setFont(font_name, font_size)
+        pdf.drawString(
+            left, row_y - 22 - (line_index * 12),
+            _fit_text(line, width - 20, font_name, font_size),
+        )
+
     footer_y = y + 27
     pdf.setFont(FONT, 8.2)
-    if explicit_collection:
-        due_text = f"Total Due: {format_currency(total_due)}"
-        if due_date:
-            due_text += f"   |   Due On: {due_date}"
-        pdf.drawString(left, footer_y + 28, _fit_text(due_text, width - 20, FONT, 8.2))
-        pdf.drawString(left, footer_y + 15, f"Balance After Payment: {format_currency(total_balance)}")
-    elif total_balance > 0:
-        pdf.drawString(left, footer_y + 28, f"Balance: {format_currency(total_balance)}")
     advance = next((payment for payment in data["payments"] if payment.get("payment_intent") == "ADVANCE"), None)
+    payment_text = f"Payment Mode: {_payment_mode_text(data['payments'])}"
     if advance:
-        pdf.drawString(left, footer_y + 28, _fit_text(
-            f"Allocated: {advance.get('allocated_academic_year') or ''} / {advance.get('allocated_term') or ''}",
-            width - 85, FONT, 8.2))
-    pdf.drawString(left, footer_y + 2, _fit_text(f"Payment Mode: {_payment_mode_text(data['payments'])}", width * 0.48, FONT, 8.2))
+        payment_text += (
+            f"   |   Allocated: {advance.get('allocated_academic_year') or ''} / "
+            f"{advance.get('allocated_term') or ''}"
+        )
+    pdf.drawString(left, footer_y + 2, _fit_text(payment_text, width * 0.58, FONT, 8.2))
 
     issuer_name = settings.get("receipt_issuer_name") or RECEIPT_ISSUER_NAME
     pdf.setFont(FONT, 7.5)

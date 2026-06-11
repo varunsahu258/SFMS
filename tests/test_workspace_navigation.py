@@ -74,3 +74,42 @@ def test_management_groups_route_existing_modules_and_mark_future_modules_planne
         "Conveyance Details Management",
     ):
         assert planned in source
+
+
+def test_management_page_does_not_repeat_top_header_title_or_description():
+    import ui_dashboard
+
+    source = inspect.getsource(ui_dashboard.DashboardWindow._show_module_group)
+    assert 'self.workspace_title.set(group["title"])' in source
+    assert 'text=group["title"]' not in source
+    assert 'text=group["description"]' not in source
+    assert 'text="← Back to Dashboard"' in source
+
+
+def test_embedded_modules_use_section_header_and_shared_scroll_canvas():
+    import ui_dashboard
+
+    source = inspect.getsource(ui_dashboard.DashboardWindow._show_workspace_page)
+    assert "_workspace_section_title(key, title)" in source
+    assert "_create_workspace_canvas()" in source
+    assert "canvas.create_window" in source
+    assert 'embedded=True' in source
+
+
+def test_workspace_mousewheel_supports_all_desktop_platform_events():
+    from types import SimpleNamespace
+
+    import ui_dashboard
+
+    normalize = ui_dashboard.DashboardWindow._mousewheel_units
+    assert normalize(SimpleNamespace(delta=120, num=None)) < 0
+    assert normalize(SimpleNamespace(delta=-120, num=None)) > 0
+    assert normalize(SimpleNamespace(delta=1, num=None)) < 0
+    assert normalize(SimpleNamespace(delta=-1, num=None)) > 0
+    assert normalize(SimpleNamespace(delta=0, num=4)) < 0
+    assert normalize(SimpleNamespace(delta=0, num=5)) > 0
+
+    bindings = inspect.getsource(ui_dashboard.DashboardWindow._bind_shortcuts)
+    assert '"<MouseWheel>"' in bindings
+    assert '"<Button-4>"' in bindings
+    assert '"<Button-5>"' in bindings

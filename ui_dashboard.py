@@ -112,6 +112,8 @@ class DashboardWindow(tk.Toplevel):
         """Build a dashboard-first workspace without a persistent left navigation bar."""
         self._nav_buttons: dict[str, tk.Button] = {}
         self._active_page = None
+        self._active_page_container = None
+        self._active_scroll_canvas = None
         self._active_nav_key = "dashboard"
         palette = {
             "sidebar": "#563bb7", "sidebar_hover": "#6d52cc", "sidebar_active": "#ffffff",
@@ -248,20 +250,76 @@ class DashboardWindow(tk.Toplevel):
 
     def _clear_workspace(self) -> None:
         """Remove the current page before rendering the next destination."""
+        if self._active_page is not None:
+            self._active_page._workspace_navigating = True
         for child in self.workspace.winfo_children():
             child._workspace_navigating = True
             child.destroy()
         self._active_page = None
+        self._active_page_container = None
+        self._active_scroll_canvas = None
+
+    def _workspace_section_title(self, key: str, fallback: str) -> str:
+        """Return a broad section label so module pages do not repeat their own title."""
+        for group in self._module_groups().values():
+            if any(item[0] == key for item in group.get("items", ())):
+                return group["title"]
+        if key in {"backup", "audit", "users", "permissions", "settings", "password"}:
+            return "Administration"
+        if key in {"help", "about"}:
+            return "Help & Information"
+        return fallback
+
+    def _create_workspace_canvas(self):
+        """Create and activate the shared vertically scrollable workspace canvas."""
+        palette = self._workspace_palette
+        container = tk.Frame(self.workspace, bg=palette["page"])
+        container.pack(fill="both", expand=True)
+        canvas = tk.Canvas(container, bg=palette["page"], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        self._active_page_container = container
+        self._active_scroll_canvas = canvas
+        return container, canvas
+
+    @staticmethod
+    def _mousewheel_units(event) -> int:
+        """Normalize Windows, macOS, and Linux mouse-wheel events to Tk units."""
+        if getattr(event, "num", None) == 4:
+            return -3
+        if getattr(event, "num", None) == 5:
+            return 3
+        delta = int(getattr(event, "delta", 0) or 0)
+        if not delta:
+            return 0
+        steps = max(1, abs(delta) // 120)
+        return -steps if delta > 0 else steps
+
+    def _on_workspace_mousewheel(self, event):
+        """Scroll whichever dashboard or embedded module page is currently visible."""
+        canvas = self._active_scroll_canvas
+        if canvas is None or not canvas.winfo_exists():
+            return None
+        units = self._mousewheel_units(event)
+        if units:
+            canvas.yview_scroll(units, "units")
+            return "break"
+        return None
 
     def _show_workspace_page(self, page_class, title: str, key: str, *args, **kwargs):
-        """Render a primary module in the dashboard instead of a new window."""
+        """Render a primary module in a mouse-wheel-scrollable dashboard workspace."""
         auth.touch_session()
         self._clear_workspace()
-        self.workspace_title.set(title)
+        self.workspace_title.set(self._workspace_section_title(key, title))
         self._set_active_navigation(key)
+        _container, canvas = self._create_workspace_canvas()
         try:
-            page = page_class(self.workspace, *args, embedded=True, **kwargs)
-            page.pack(fill="both", expand=True)
+            page = page_class(canvas, *args, embedded=True, **kwargs)
+            window = canvas.create_window((0, 0), window=page, anchor="nw")
+            page.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
+            canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window, width=event.width))
             page._workspace_on_close = self._show_dashboard
             self._active_page = page
             return page
@@ -271,19 +329,12 @@ class DashboardWindow(tk.Toplevel):
 
     def _scrollable_workspace_page(self):
         """Create a vertically scrollable page inside the workspace."""
-        palette = self._workspace_palette
-        container = tk.Frame(self.workspace, bg=palette["page"])
-        container.pack(fill="both", expand=True)
-        canvas = tk.Canvas(container, bg=palette["page"], highlightthickness=0)
-        scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side="right", fill="y")
-        canvas.pack(side="left", fill="both", expand=True)
-        page = tk.Frame(canvas, bg=palette["page"])
+        _container, canvas = self._create_workspace_canvas()
+        page = tk.Frame(canvas, bg=self._workspace_palette["page"])
         window = canvas.create_window((0, 0), window=page, anchor="nw")
         page.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window, width=event.width))
-        return container, page
+        return self._active_page_container, page
 
     def _management_card(self, parent, column: int, group_key: str, group: dict) -> None:
         """Render one large clickable management-area card."""
@@ -395,12 +446,8 @@ class DashboardWindow(tk.Toplevel):
         content = tk.Frame(page, bg=palette["page"])
         content.pack(fill="both", expand=True, padx=28, pady=22)
         top = tk.Frame(content, bg=palette["page"])
-        top.pack(fill="x", pady=(0, 16))
+        top.pack(fill="x", pady=(0, 10))
         ttk.Button(top, text="← Back to Dashboard", command=self._show_dashboard).pack(side="left")
-        tk.Label(top, text=group["title"], bg=palette["page"], fg=palette["text"],
-                 font=("Segoe UI", 21, "bold")).pack(side="left", padx=18)
-        tk.Label(content, text=group["description"], bg=palette["page"], fg=palette["muted"],
-                 font=("Segoe UI", 10)).pack(anchor="w", pady=(0, 12))
 
         item_grid = tk.Frame(content, bg=palette["page"])
         item_grid.pack(fill="x")
@@ -506,6 +553,9 @@ class DashboardWindow(tk.Toplevel):
 
     def _bind_shortcuts(self) -> None:
         """Bind documented dashboard keyboard shortcuts to existing safe handlers."""
+        self.bind("<MouseWheel>", self._on_workspace_mousewheel, add="+")
+        self.bind("<Button-4>", self._on_workspace_mousewheel, add="+")
+        self.bind("<Button-5>", self._on_workspace_mousewheel, add="+")
         self.bind("<F1>", lambda _event: self._on_main_collection_click())
         self.bind("<F2>", lambda _event: self._on_dues_click())
         self.bind("<F3>", lambda _event: self._on_reports_click())
