@@ -101,11 +101,23 @@ def _receipt_data(conn, receipt_no: str) -> dict:
     if "is_active" in fee_head_columns:
         fee_head_conditions.append("is_active=1")
     if "register_type" in fee_head_columns:
-        fee_head_conditions.append("register_type IN ('BIG','BOTH')")
+        register = "SMALL" if str(receipt_values.get("receipt_type") or "").upper() == "SMALL" else "BIG"
+        fee_head_conditions.append(f"register_type IN ('{register}','BOTH')")
     where_clause = f" WHERE {' AND '.join(fee_head_conditions)}" if fee_head_conditions else ""
     receipt_values["all_fee_heads"] = [
         str(row[0]) for row in conn.execute(f"SELECT name FROM fee_heads{where_clause} ORDER BY id")
     ] if "fee_heads" in tables_available else []
+    ledger_columns = {row[1] for row in conn.execute("PRAGMA table_info(charge_ledger)")} if "charge_ledger" in tables_available else set()
+    if "student_id" in ledger_columns:
+        overall_balance = float(conn.execute(
+            "SELECT COALESCE(SUM(balance),0) FROM charge_ledger WHERE student_id=? AND balance>0",
+            (receipt_values["student_id"],),
+        ).fetchone()[0] or 0)
+    else:
+        overall_balance = sum(float(payment.get("balance") or 0) for payment in payments)
+    receipt_total = sum(float(payment.get("amount_paid") or 0) for payment in payments)
+    receipt_values["overall_balance"] = overall_balance
+    receipt_values["overall_due_before_payment"] = overall_balance + receipt_total
     return receipt_values
 
 
@@ -203,26 +215,26 @@ def _draw_copy(
     col1 = left
     col2 = x + width * 0.67
     col3 = right
-    main_collection = any(
-        str(payment.get("note") or "").startswith("MAIN COLLECTION")
+    explicit_collection = any(
+        str(payment.get("note") or "").startswith(("MAIN COLLECTION", "SMALL COLLECTION"))
         for payment in data["payments"]
     )
     pdf.setFont(FONT_BOLD, 8.5)
     pdf.line(left, table_top + 4, right, table_top + 4)
     pdf.drawString(col1, table_top - 7, "Fee Head")
-    if not main_collection:
+    if not explicit_collection:
         pdf.drawRightString(col2, table_top - 7, "Amount Due")
     pdf.drawRightString(col3, table_top - 7, "Amount Paid")
     pdf.line(left, table_top - 12, right, table_top - 12)
 
     row_y = table_top - 26
     total_paid = sum(float(payment.get("amount_paid") or 0) for payment in data["payments"])
-    total_due = sum(float(payment.get("amount_due") or 0) for payment in data["payments"])
-    total_balance = sum(float(payment.get("balance") or 0) for payment in data["payments"])
+    total_due = float(data.get("overall_due_before_payment") or 0)
+    total_balance = float(data.get("overall_balance") or 0)
     due_date = next((str(payment.get("allocated_term") or "") for payment in data["payments"] if payment.get("allocated_term")), "")
     pdf.setFont(FONT, 8.5)
 
-    if main_collection:
+    if explicit_collection:
         fee_heads = data.get("all_fee_heads") or [
             str(payment.get("fee_head") or "Fee") for payment in data["payments"]
         ]
@@ -253,7 +265,7 @@ def _draw_copy(
 
     footer_y = y + 27
     pdf.setFont(FONT, 8.2)
-    if main_collection:
+    if explicit_collection:
         due_text = f"Total Due: {format_currency(total_due)}"
         if due_date:
             due_text += f"   |   Due On: {due_date}"
@@ -342,21 +354,17 @@ def print_receipt(conn, receipt_no, reprint=False, reprint_reason: str | None = 
         if reprint:
             _draw_watermark(pdf, page_width, page_height)
 
-        if str(data.get("receipt_type") or "BIG").upper() == "SMALL":
-            panel_y = page_height / 2
-            panel_height = page_height / 2 - MARGIN
-            available_width = page_width - 2 * MARGIN
-            panel_width = available_width / 2
-            _draw_copy(pdf, data, settings, qr_reader, MARGIN, panel_y, panel_width, panel_height, "SCHOOL COPY")
-            _draw_copy(pdf, data, settings, qr_reader, MARGIN + panel_width, panel_y, panel_width, panel_height, "PARENT COPY")
-        else:
-            half_height = page_height / 2
-            _draw_copy(pdf, data, settings, qr_reader, MARGIN, half_height + 8, page_width - 2 * MARGIN, half_height - MARGIN - 8, "SCHOOL COPY")
-            pdf.saveState()
-            pdf.setDash(2, 3)
-            pdf.line(MARGIN, half_height, page_width - MARGIN, half_height)
-            pdf.restoreState()
-            _draw_copy(pdf, data, settings, qr_reader, MARGIN, MARGIN, page_width - 2 * MARGIN, half_height - MARGIN - 8, "PARENT COPY")
+        # Main and Small registers deliberately share the exact same receipt layout;
+        # register identity remains stored in receipts.receipt_type for reports/audit.
+        half_height = page_height / 2
+        _draw_copy(pdf, data, settings, qr_reader, MARGIN, half_height + 8,
+                   page_width - 2 * MARGIN, half_height - MARGIN - 8, "SCHOOL COPY")
+        pdf.saveState()
+        pdf.setDash(2, 3)
+        pdf.line(MARGIN, half_height, page_width - MARGIN, half_height)
+        pdf.restoreState()
+        _draw_copy(pdf, data, settings, qr_reader, MARGIN, MARGIN,
+                   page_width - 2 * MARGIN, half_height - MARGIN - 8, "PARENT COPY")
 
         pdf.showPage()
         pdf.save()

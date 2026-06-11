@@ -173,6 +173,8 @@ class DashboardWindow(tk.Toplevel):
         section("School Records")
         for key, permission, text, command, symbol in (
             ("students", "manage_students", "Students", self._on_students_click, "♟"),
+            ("student_view", "view_student_details", "View Student Details", self._on_student_view_click, "◉"),
+            ("receipt_history", "view_receipts", "Receipt History", self._on_receipt_history_click, "⌕"),
             ("classes", "manage_classes", "Classes & Sections", self._on_classes_click, "▥"),
             ("reports", "view_reports", "Reports", self._on_reports_click, "▧"),
             ("timetable", "view_timetable", "Timetable", self._on_timetable_click, "▦"),
@@ -186,6 +188,7 @@ class DashboardWindow(tk.Toplevel):
             ("exemptions", "manage_exemptions", "Exemptions", self._on_exemption_click, "◇"),
             ("fee_heads", "manage_fee_heads", "Fee Heads", self._on_fee_heads_click, "≡"),
             ("fee_structure", "manage_fee_structure", "Fee Structure", self._on_fee_structure_click, "▦"),
+            ("late_fees", "apply_late_fees", "Apply Late Fees", self._on_late_fees_click, "+"),
             ("years", "manage_academic_years", "Academic Years", self._on_academic_years_click, "□"),
             ("reprint", "reprint_receipts", "Receipt Reprint", self._on_receipt_reprint_click, "↻"),
             ("void", "void_payments", "Void Payment", self._on_void_payment_click, "×"),
@@ -670,6 +673,27 @@ class DashboardWindow(tk.Toplevel):
         from ui_academic_year import AcademicYearWindow
 
         self._show_workspace_page(AcademicYearWindow, "Academic Years", "years")
+
+    @auth.require_permission("view_student_details")
+    def _on_student_view_click(self) -> None:
+        """Open the read-only student profile search."""
+        auth.touch_session()
+        from ui_student_view import StudentViewWindow
+        self._show_workspace_page(StudentViewWindow, "View Student Details", "student_view")
+
+    @auth.require_permission("view_receipts")
+    def _on_receipt_history_click(self) -> None:
+        """Open read-only receipt history."""
+        auth.touch_session()
+        from ui_receipt_history import ReceiptHistoryWindow
+        self._show_workspace_page(ReceiptHistoryWindow, "Receipt History", "receipt_history")
+
+    @auth.require_permission("apply_late_fees")
+    def _on_late_fees_click(self) -> None:
+        """Open selective late-fee assessment."""
+        auth.touch_session()
+        from ui_late_fees import LateFeeWindow
+        self._show_workspace_page(LateFeeWindow, "Apply Late Fees", "late_fees")
 
     @auth.require_permission("view_reports")
     def _on_reports_click(self) -> None:

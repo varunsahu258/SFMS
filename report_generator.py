@@ -213,15 +213,24 @@ def _normalized_collection_modes(payment_modes: tuple[str, ...]) -> tuple[str, .
 
 
 def _collection_source_rows(conn, payment_modes: tuple[str, ...]) -> list[dict]:
-    """Load non-void payment rows used by clean collection reports."""
+    """Load non-void payment rows with a backward-compatible register label."""
     modes = _normalized_collection_modes(payment_modes)
     placeholders = ",".join("?" for _ in modes)
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "receipts" in tables:
+        register_expr = "UPPER(COALESCE(r.receipt_type,'BIG'))"
+        receipt_join = "LEFT JOIN receipts r ON r.receipt_no=p.receipt_no"
+    else:
+        register_expr = "CASE WHEN UPPER(COALESCE(p.note,'')) LIKE 'SMALL COLLECTION%' THEN 'SMALL' ELSE 'BIG' END"
+        receipt_join = ""
     return _row_dicts(conn.execute(
         f"""
         SELECT p.id AS payment_id,p.receipt_no,p.payment_date,p.amount_paid,
                UPPER(COALESCE(p.payment_mode,'')) AS payment_mode,p.note,
-               p.cheque_status,s.name AS student,u.username AS collected_by
+               p.cheque_status,s.name AS student,u.username AS collected_by,
+               {register_expr} AS register_type
         FROM payments p
+        {receipt_join}
         JOIN students s ON s.id=p.student_id
         LEFT JOIN users u ON u.id=p.collected_by
         WHERE UPPER(COALESCE(p.payment_mode,'')) IN ({placeholders})
@@ -244,6 +253,7 @@ def _group_collection_rows(rows: list[dict]) -> list[dict]:
             "receipt_no": key[0], "student": key[1],
             "date": payment_date.strftime("%d-%m-%Y"), "amount": 0.0,
             "modes": [], "collectors": [],
+            "register_type": "SMALL" if str(row.get("register_type") or "").upper() == "SMALL" else "BIG",
         })
         group["amount"] += float(row.get("amount_paid") or 0)
         mode = str(row.get("payment_mode") or "").upper()
@@ -256,7 +266,7 @@ def _group_collection_rows(rows: list[dict]) -> list[dict]:
 
 
 def collection_report_rows(
-    conn, start_date: str, end_date: str, payment_modes: tuple[str, ...]
+    conn, start_date: str, end_date: str, payment_modes: tuple[str, ...], *, include_register: bool = False
 ) -> list[dict]:
     """Return one collection row per receipt/student without fee-head detail."""
     start = _parse_date(start_date)
@@ -270,7 +280,11 @@ def collection_report_rows(
         payment_date = _parse_date(row.get("payment_date"))
         if payment_date is not None and start <= payment_date <= end:
             rows.append(row)
-    return _group_collection_rows(rows)
+    grouped = _group_collection_rows(rows)
+    if not include_register:
+        for row in grouped:
+            row.pop("register_type", None)
+    return grouped
 
 
 def _checkpoint_key(mode: str) -> str:
@@ -279,7 +293,7 @@ def _checkpoint_key(mode: str) -> str:
 
 
 def collection_report_rows_since_last(
-    conn, payment_modes: tuple[str, ...]
+    conn, payment_modes: tuple[str, ...], *, include_register: bool = False
 ) -> tuple[list[dict], dict[str, int], dict[str, int], str]:
     """Return payments after each selected mode's last saved report checkpoint."""
     modes = _normalized_collection_modes(payment_modes)
@@ -293,12 +307,11 @@ def collection_report_rows_since_last(
         if mode in previous and payment_id > previous[mode]:
             selected.append(row)
             latest[mode] = max(latest[mode], payment_id)
-    return (
-        _group_collection_rows(selected),
-        previous,
-        latest,
-        settings.get("collection_report_last_generated_at", ""),
-    )
+    grouped = _group_collection_rows(selected)
+    if not include_register:
+        for row in grouped:
+            row.pop("register_type", None)
+    return (grouped, previous, latest, settings.get("collection_report_last_generated_at", ""))
 
 
 def _latest_collection_payment_ids(conn, payment_modes: tuple[str, ...]) -> dict[str, int]:
@@ -339,7 +352,7 @@ def collection_report(
     latest_checkpoints: dict[str, int] | None = None
     if report_kind == "SINCE_LAST":
         rows, _previous, latest_checkpoints, previous_generated_at = collection_report_rows_since_last(
-            conn, payment_modes
+            conn, payment_modes, include_register=True
         )
         title = "Collection Report — Transactions After Last Report"
         period_text = (
@@ -349,7 +362,7 @@ def collection_report(
         )
         stem = f"collection_since_last_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     else:
-        rows = collection_report_rows(conn, start_date, end_date, payment_modes)
+        rows = collection_report_rows(conn, start_date, end_date, payment_modes, include_register=True)
         if report_kind == "DAILY":
             title = f"Daily Collection Report — {start_date}"
             period_text = f"Report date: {start_date}"
@@ -370,21 +383,23 @@ def collection_report(
     if include_collector:
         columns.append(("collectors", "Collected By", 32 * mm))
 
-    data = [[heading for _key, heading, _width in columns]]
-    for row in rows:
-        rendered = []
-        for key, _heading, _width in columns:
-            value = row[key]
-            if key == "amount":
-                value = format_currency(value)
-            elif key in {"modes", "collectors"}:
-                value = " / ".join(value)
-            rendered.append(value)
-        data.append(rendered)
-    if len(data) == 1:
-        empty = ["" for _column in columns]
-        empty[0] = "No collections"
-        data.append(empty)
+    def render_rows(section_rows: list[dict]) -> list[list]:
+        data = [[heading for _key, heading, _width in columns]]
+        for row in section_rows:
+            rendered = []
+            for key, _heading, _width in columns:
+                value = row[key]
+                if key == "amount":
+                    value = format_currency(value)
+                elif key in {"modes", "collectors"}:
+                    value = " / ".join(value)
+                rendered.append(value)
+            data.append(rendered)
+        if len(data) == 1:
+            empty = ["" for _column in columns]
+            empty[0] = "No collections"
+            data.append(empty)
+        return data
 
     selected_modes = ", ".join(_normalized_collection_modes(payment_modes))
     recipient = report_collected_by.strip()
@@ -405,7 +420,16 @@ def collection_report(
     requested_widths = [width for _key, _heading, width in columns]
     available_width = A4[0] - (2 * MARGIN)
     scale = min(1.0, available_width / sum(requested_widths))
-    story.append(_table(data, [width * scale for width in requested_widths], 7.5, right_columns=right_columns))
+    for register, heading in (("BIG", "Main Register"), ("SMALL", "Small Register")):
+        section_rows = [row for row in rows if row.get("register_type") == register]
+        story.append(Paragraph(heading, styles["heading"]))
+        story.append(_table(render_rows(section_rows), [width * scale for width in requested_widths],
+                            7.5, right_columns=right_columns))
+        story.append(Paragraph(
+            f"{heading} Total: {format_currency(sum(float(row['amount']) for row in section_rows))}",
+            styles["right"],
+        ))
+        story.append(Spacer(1, 4 * mm))
     total = sum(float(row["amount"]) for row in rows)
     story.extend([
         Spacer(1, 5 * mm),
@@ -528,20 +552,30 @@ def monthly_report(conn, year, month) -> str:
     return path
 
 
-def classwise_dues_report(conn, class_name, academic_year, student_id=None) -> str:
-    """Generate one total outstanding balance and oldest due date per student."""
+def classwise_dues_report(
+    conn, class_name, academic_year, student_id=None, *, student_ids=None,
+    include_fields: tuple[str, ...] = (),
+) -> str:
+    """Generate combined dues with configurable student details and selection."""
+    selected_ids = set(int(value) for value in (student_ids or ([] if student_id is None else [student_id])))
     if academic_year == active_academic_year(conn):
-        ensure_student_charges(conn, academic_year, student_id)
+        if selected_ids:
+            for selected_id in selected_ids:
+                ensure_student_charges(conn, academic_year, selected_id)
+        else:
+            ensure_student_charges(conn, academic_year)
     raw_rows = [
         row for row in LedgerService(conn).get_all_outstanding(academic_year)
-        if row["student_class"] == class_name
-        and (student_id is None or row["student_id"] == student_id)
+        if (not class_name or row["student_class"] == class_name)
+        and (not selected_ids or int(row["student_id"]) in selected_ids)
     ]
     groups: dict[int, dict] = {}
     for row in raw_rows:
         group = groups.setdefault(int(row["student_id"]), {
             "student": row["student"], "class": row["student_class"],
-            "total_due": 0.0, "oldest_due": None,
+            "father_name": row.get("father_name") or "", "phone": row.get("phone") or "",
+            "mobile2": row.get("mobile2") or "", "address": row.get("address") or "",
+            "scholar_no": row.get("scholar_no") or "", "total_due": 0.0, "oldest_due": None,
         })
         group["total_due"] += float(row.get("outstanding") or 0)
         due_date = _parse_date(row.get("due_date"))
@@ -549,23 +583,36 @@ def classwise_dues_report(conn, class_name, academic_year, student_id=None) -> s
             group["oldest_due"] = due_date
     rows = sorted(groups.values(), key=lambda row: row["student"])
     today = date.today()
-    data = [["Student", "Class", "Total Due", "Due On", "Days Overdue"]]
+    optional = {
+        "father_name": ("Father's Name", 35 * mm), "phone": ("Mobile", 25 * mm),
+        "mobile2": ("Alternate Mobile", 28 * mm), "address": ("Address", 48 * mm),
+        "scholar_no": ("Scholar No.", 25 * mm),
+    }
+    fields = [("student", "Student", 42 * mm), ("class", "Class", 22 * mm)]
+    fields.extend((key, *optional[key]) for key in include_fields if key in optional)
+    fields.extend((("total_due", "Total Due", 28 * mm), ("due_on", "Due On", 25 * mm),
+                   ("days", "Days", 18 * mm)))
+    data = [[heading for _key, heading, _width in fields]]
     for row in rows:
         due_date = row["oldest_due"]
-        days = max(0, (today - due_date).days) if due_date else 0
-        data.append([
-            row["student"], row["class"], format_currency(row["total_due"]),
-            due_date.strftime("%d-%m-%Y") if due_date else "", days,
-        ])
+        values = dict(row)
+        values.update({"total_due": format_currency(row["total_due"]),
+                       "due_on": due_date.strftime("%d-%m-%Y") if due_date else "",
+                       "days": max(0, (today - due_date).days) if due_date else 0})
+        data.append([values.get(key, "") for key, _heading, _width in fields])
     if len(data) == 1:
-        data.append(["No outstanding dues", "", format_currency(0), "", 0])
-    suffix = f"_student_{student_id}" if student_id is not None else ""
-    path = _output_path(f"class_dues_{_safe_name(class_name)}_{_safe_name(academic_year)}{suffix}.pdf")
+        data.append(["No outstanding dues"] + ["" for _ in fields[1:]])
+    selection_suffix = "_selected" if selected_ids else ""
+    path = _output_path(f"class_dues_{_safe_name(class_name or 'all')}_{_safe_name(academic_year)}{selection_suffix}.pdf")
     story: list = []
-    report_title = f"Student Dues Statement — {rows[0]['student']}" if student_id is not None and rows else f"Classwise Dues Report — {class_name} ({academic_year})"
-    _header(story, conn, report_title)
-    story.append(_table(data, [50 * mm, 31 * mm, 35 * mm, 32 * mm, 27 * mm], 7.2, right_columns=(2, 4)))
-    _document(path, f"Classwise Dues {class_name}").build(story)
+    title = "Selected Student Dues Statements" if selected_ids else f"Classwise Dues Report — {class_name} ({academic_year})"
+    _header(story, conn, title)
+    widths = [width for _key, _heading, width in fields]
+    available = A4[0] - 2 * MARGIN
+    scale = min(1.0, available / sum(widths))
+    right_columns = tuple(index for index, (key, _heading, _width) in enumerate(fields) if key in {"total_due", "days"})
+    story.append(_table(data, [width * scale for width in widths], 6.5, right_columns=right_columns))
+    _document(path, title).build(story)
     return path
 
 

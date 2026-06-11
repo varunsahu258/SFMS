@@ -9,6 +9,7 @@ from tkinter import messagebox, ttk
 
 import auth
 from ui_workspace import WorkspacePage
+from ui_theme import apply_theme
 from config import SPLASH_BG, SPLASH_FG
 from ledger import active_academic_year, ensure_student_charges
 from ledger_service import LedgerService
@@ -29,6 +30,7 @@ def aggregate_student_dues(rows: list[dict]) -> list[dict]:
             "student_section": row.get("student_section") or "",
             "scholar_no": row.get("scholar_no") or "",
             "father_name": row.get("father_name") or "",
+            "address": row.get("address") or "",
             "aadhaar": row.get("aadhaar") or "",
             "phone": row.get("phone") or "",
             "mobile2": row.get("mobile2") or "",
@@ -93,9 +95,10 @@ class DuesWindow(WorkspacePage):
         self.class_combo.pack(side="left", padx=6)
         self.class_combo.bind("<<ComboboxSelected>>", self._class_selected)
         ttk.Button(top, text="Load", command=self.load_dues).pack(side="left", padx=6)
+        ttk.Button(top, text="Select All", command=self.select_all_students).pack(side="left", padx=3)
         self.export_button = ttk.Button(top, text="Export", command=self.export, state="disabled")
         self.export_button.pack(side="right")
-        ttk.Button(top, text="Print Dues Statement", command=self.print_student_statement).pack(side="right", padx=4)
+        ttk.Button(top, text="Print Selected Statements", command=self.print_student_statement).pack(side="right", padx=4)
         ttk.Button(top, text="Issue TC", command=self.issue_tc).pack(side="right", padx=4)
         columns = ("scholar_no", "student", "father_name", "class", "total_due", "due_date", "days")
         self.tree = ttk.Treeview(self, columns=columns, show="headings")
@@ -136,7 +139,7 @@ class DuesWindow(WorkspacePage):
             if search:
                 existing_ids = {row["student_id"] for row in rows}
                 students = conn.execute(
-                    """SELECT id,name,class,section,scholar_no,father_name,aadhaar,phone,mobile2
+                    """SELECT id,name,class,section,scholar_no,father_name,address,aadhaar,phone,mobile2
                        FROM students WHERE is_active=1 ORDER BY class,name"""
                 ).fetchall()
                 for student in students:
@@ -144,7 +147,7 @@ class DuesWindow(WorkspacePage):
                         "student_id": int(student["id"]), "student": student["name"] or "",
                         "student_class": student["class"] or "", "student_section": student["section"] or "",
                         "scholar_no": student["scholar_no"] or "", "father_name": student["father_name"] or "",
-                        "aadhaar": student["aadhaar"] or "",
+                        "address": student["address"] or "", "aadhaar": student["aadhaar"] or "",
                         "phone": student["phone"] or "", "mobile2": student["mobile2"] or "",
                         "total_due": 0.0, "oldest_due_date": "",
                     }
@@ -169,6 +172,10 @@ class DuesWindow(WorkspacePage):
             self.rows.append(row_data)
             item = self.tree.insert("", "end", values=values, tags=("overdue",) if days > 30 else ())
             self.row_students[item] = row_data
+
+    def select_all_students(self) -> None:
+        """Select every currently visible student for batch statement printing."""
+        self.tree.selection_set(self.tree.get_children())
 
     def _selected_student(self) -> dict | None:
         """Return student metadata for the selected dues row."""
@@ -204,22 +211,28 @@ class DuesWindow(WorkspacePage):
         messagebox.showinfo("Transfer Certificate", f"TC saved to:\n{path}", parent=self)
 
     def print_student_statement(self) -> None:
-        """Generate a single-student dues statement PDF."""
+        """Generate configurable statements for one or more selected students."""
         auth.touch_session()
-        row = self._selected_student()
-        if row is None:
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showwarning("Dues Statement", "Select one or more students first.", parent=self)
+            return
+        students = [self.row_students[item] for item in selected if item in self.row_students]
+        dialog = DuesStatementOptionsDialog(self, len(students))
+        if not dialog.result:
             return
         from report_generator import classwise_dues_report
-
         try:
             with connect_db() as conn:
                 year = active_academic_year(conn)
-                path = classwise_dues_report(conn, row["student_class"], year, int(row["student_id"]))
+                path = classwise_dues_report(
+                    conn, "", year,
+                    student_ids=[int(row["student_id"]) for row in students],
+                    include_fields=dialog.result,
+                )
         except Exception as exc:
-            messagebox.showerror("Dues Statement", str(exc), parent=self)
-            return
-        if hasattr(os, "startfile"):
-            os.startfile(path)
+            messagebox.showerror("Dues Statement", str(exc), parent=self); return
+        if hasattr(os, "startfile"): os.startfile(path)
         messagebox.showinfo("Dues Statement", f"PDF saved to:\n{path}", parent=self)
 
     def export(self) -> None:
@@ -241,6 +254,32 @@ class DuesWindow(WorkspacePage):
             academic_year = active_academic_year(conn)
             result = classwise_dues_report(conn, class_name, academic_year)
         messagebox.showinfo("Dues export", f"Dues report saved to: {result}")
+
+
+class DuesStatementOptionsDialog(tk.Toplevel):
+    """Choose which student details appear on selected dues statements."""
+
+    OPTIONS = (("father_name", "Father's Name"), ("phone", "Mobile Number"),
+               ("mobile2", "Alternate Mobile"), ("address", "Address"),
+               ("scholar_no", "Scholar Number"))
+
+    def __init__(self, master, count: int):
+        super().__init__(master)
+        apply_theme(self)
+        self.title("Dues Statement Options"); self.transient(master); self.grab_set()
+        self.result = None; self.vars = {key: tk.BooleanVar(value=True) for key, _ in self.OPTIONS}
+        frame = ttk.Frame(self, padding=20); frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text=f"Print statements for {count} selected student(s)", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(frame, text="Student name, class, total due, due date, and overdue days are always included.",
+                  style="Muted.TLabel", wraplength=440).pack(anchor="w", pady=(3, 12))
+        for key, label in self.OPTIONS:
+            ttk.Checkbutton(frame, text=label, variable=self.vars[key]).pack(anchor="w", pady=2)
+        ttk.Button(frame, text="Generate PDF", command=self._accept, style="Accent.TButton").pack(fill="x", pady=(16, 0))
+        self.wait_window(self)
+
+    def _accept(self) -> None:
+        self.result = tuple(key for key, value in self.vars.items() if value.get())
+        self.destroy()
 
 
 def days_overdue(due_date: str | None) -> int:

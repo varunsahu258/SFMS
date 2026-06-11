@@ -31,11 +31,11 @@ def _due_key(row: dict) -> tuple[datetime, int]:
     return datetime.max, int(row["charge_id"])
 
 
-def main_collection_summary(conn, student_id: int) -> dict:
-    """Return every outstanding main-register fee head for explicit selection."""
+def collection_summary(conn, student_id: int, register_types: tuple[str, ...] = ("BIG", "BOTH")) -> dict:
+    """Return outstanding fee heads for one explicit-selection register workflow."""
     rows = [
         dict(row)
-        for row in charge_rows(conn, student_id, active_academic_year(conn), ("BIG", "BOTH"))
+        for row in charge_rows(conn, student_id, active_academic_year(conn), register_types)
         if float(row["balance"] or 0) > 0
     ]
     rows.sort(key=_due_key)
@@ -52,9 +52,14 @@ def main_collection_summary(conn, student_id: int) -> dict:
     }
 
 
+def main_collection_summary(conn, student_id: int) -> dict:
+    """Backward-compatible BIG/BOTH collection summary."""
+    return collection_summary(conn, student_id, ("BIG", "BOTH"))
+
+
 def selected_main_collection_items(
     charges: list[dict], selected: dict[int, bool], amounts: dict[int, str],
-    payment_mode: str, maximum,
+    payment_mode: str, maximum, collection_note: str = "MAIN COLLECTION",
 ) -> list[dict]:
     """Build one correctly matched payment/allocation row per selected fee head."""
     payable = []
@@ -76,7 +81,7 @@ def selected_main_collection_items(
             "amount_paying": amount,
             "balance_after": Decimal(str(charge["balance"] or 0)) - Decimal(str(amount)),
             "mode": mode,
-            "note": "MAIN COLLECTION",
+            "note": collection_note,
             "allocations": [{"charge_id": charge_id, "amount": amount}],
         })
     if not payable:
@@ -89,6 +94,8 @@ class CollectionMainWindow(CollectionBaseWindow):
 
     register_types = ("BIG", "BOTH")
     receipt_type = "BIG"
+    page_title = "Main Register Fee Collection"
+    collection_note = "MAIN COLLECTION"
 
     @auth.require_permission("collect_main_fees")
     def __init__(self, master=None, *, embedded: bool = False):
@@ -105,7 +112,7 @@ class CollectionMainWindow(CollectionBaseWindow):
         page = tk.Frame(self, bg=PAGE_BG)
         page.pack(fill="both", expand=True, padx=22, pady=18)
 
-        tk.Label(page, text="Collect student fees", bg=PAGE_BG, fg=TEXT,
+        tk.Label(page, text=self.page_title, bg=PAGE_BG, fg=TEXT,
                  font=("Segoe UI", 20, "bold")).pack(anchor="w")
         tk.Label(
             page,
@@ -168,7 +175,7 @@ class CollectionMainWindow(CollectionBaseWindow):
         self.selected_head_vars.clear()
         self.amount_entries.clear()
         with connect_db() as conn:
-            self.main_summary = main_collection_summary(conn, self.selected_student_id)
+            self.main_summary = collection_summary(conn, self.selected_student_id, self.register_types)
         self.fee_items = self.main_summary["charges"]
         total_due = float(self.main_summary["total_due"])
         due_date = self.main_summary["oldest_due_date"] or "Not set"
@@ -228,7 +235,7 @@ class CollectionMainWindow(CollectionBaseWindow):
         )
 
         if not self.fee_items:
-            tk.Label(rows_frame, text="No outstanding main-register fees for this student.",
+            tk.Label(rows_frame, text=f"No outstanding {self.receipt_type.lower()}-register fees for this student.",
                      bg=CARD_BG, fg=MUTED, font=("Segoe UI", 11)).grid(
                          row=0, column=0, columnspan=5, sticky="w", padx=8, pady=20)
         for row_index, item in enumerate(self.fee_items):
@@ -329,6 +336,7 @@ class CollectionMainWindow(CollectionBaseWindow):
             {charge_id: variable.get() for charge_id, variable in self.amount_vars.items()},
             self.main_mode_var.get(),
             maximum,
+            self.collection_note,
         )
         detail_source = next((item for item in self.fee_items if item.get("note") or item.get("cheque_no")), {})
         for item in payable:

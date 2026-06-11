@@ -414,6 +414,28 @@ def migration_v012_timetable(conn: sqlite3.Connection) -> None:
     )
 
 
+def migration_v013_late_fees(conn: sqlite3.Connection) -> None:
+    """Add audited, one-row-per-assessment late-fee records."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS late_fee_assessments(
+            id INTEGER PRIMARY KEY,
+            student_id INTEGER NOT NULL,
+            charge_id INTEGER NOT NULL UNIQUE,
+            amount REAL NOT NULL CHECK(amount > 0),
+            due_date TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            assessed_at TEXT NOT NULL,
+            assessed_by INTEGER,
+            FOREIGN KEY(student_id) REFERENCES students(id),
+            FOREIGN KEY(charge_id) REFERENCES student_charges(id),
+            FOREIGN KEY(assessed_by) REFERENCES users(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_late_fees_student ON late_fee_assessments(student_id,assessed_at);
+        """
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     ("v001_base_settings", migration_v001_base_settings),
     ("v002_setup_defaults", migration_v002_setup_defaults),
@@ -427,6 +449,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     ("v010_accountant_permissions", migration_v010_accountant_permissions),
     ("v011_receipt_issuer_setting", migration_v011_receipt_issuer_setting),
     ("v012_timetable", migration_v012_timetable),
+    ("v013_late_fees", migration_v013_late_fees),
 )
 
 
