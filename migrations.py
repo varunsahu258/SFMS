@@ -463,6 +463,38 @@ def migration_v014_admissions(conn: sqlite3.Connection) -> None:
     )
 
 
+def migration_v015_installment_schedules(conn: sqlite3.Connection) -> None:
+    """Add configurable 48/26/26 installment due dates by class and year."""
+    late_fee_columns = {row[1] for row in conn.execute("PRAGMA table_info(late_fee_assessments)")}
+    if "academic_year" not in late_fee_columns:
+        conn.execute("ALTER TABLE late_fee_assessments ADD COLUMN academic_year TEXT")
+    if "installment_no" not in late_fee_columns:
+        conn.execute("ALTER TABLE late_fee_assessments ADD COLUMN installment_no INTEGER")
+    if "register_type" not in late_fee_columns:
+        conn.execute("ALTER TABLE late_fee_assessments ADD COLUMN register_type TEXT")
+    conn.executescript(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_late_fee_once_per_installment
+            ON late_fee_assessments(student_id,academic_year,installment_no,register_type)
+            WHERE installment_no IS NOT NULL;
+        CREATE TABLE IF NOT EXISTS installment_schedules(
+            id INTEGER PRIMARY KEY,
+            academic_year TEXT NOT NULL,
+            class_name TEXT NOT NULL,
+            installment_1_due TEXT NOT NULL,
+            installment_2_due TEXT NOT NULL,
+            installment_3_due TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            updated_by INTEGER,
+            UNIQUE(academic_year,class_name),
+            FOREIGN KEY(updated_by) REFERENCES users(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_installment_schedule_year_class
+            ON installment_schedules(academic_year,class_name);
+        """
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     ("v001_base_settings", migration_v001_base_settings),
     ("v002_setup_defaults", migration_v002_setup_defaults),
@@ -478,6 +510,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     ("v012_timetable", migration_v012_timetable),
     ("v013_late_fees", migration_v013_late_fees),
     ("v014_admissions", migration_v014_admissions),
+    ("v015_installment_schedules", migration_v015_installment_schedules),
 )
 
 

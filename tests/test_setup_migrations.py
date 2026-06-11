@@ -78,3 +78,21 @@ def test_admission_migration_preserves_referenced_fee_structure_rows():
     assert conn.execute("SELECT COUNT(*) FROM fee_structure").fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM student_charges").fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM admissions").fetchone()[0] == 0
+
+
+def test_installment_schedule_migration_is_idempotent():
+    from migrations import migration_v013_late_fees, migration_v015_installment_schedules
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript("""
+        CREATE TABLE users(id INTEGER PRIMARY KEY);
+        CREATE TABLE students(id INTEGER PRIMARY KEY);
+        CREATE TABLE student_charges(id INTEGER PRIMARY KEY);
+    """)
+    migration_v013_late_fees(conn)
+    migration_v015_installment_schedules(conn)
+    migration_v015_installment_schedules(conn)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(installment_schedules)")}
+    assert {"academic_year", "class_name", "installment_1_due", "installment_2_due", "installment_3_due"} <= columns
+    late_columns = {row[1] for row in conn.execute("PRAGMA table_info(late_fee_assessments)")}
+    assert {"academic_year", "installment_no", "register_type"} <= late_columns

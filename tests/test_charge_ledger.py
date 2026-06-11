@@ -296,3 +296,18 @@ def test_one_time_admission_head_is_not_generated_from_class_fee_structure():
     ensure_student_charges(conn, "2026-27", 1)
 
     assert conn.execute("SELECT COUNT(*) FROM student_charges WHERE fee_head_id=2").fetchone()[0] == 0
+
+
+def test_discount_spans_multiple_charges_and_reduces_derived_due():
+    from ui_discount import apply_discount
+
+    conn = sqlite3.connect(":memory:")
+    schema(conn)
+    conn.execute("INSERT INTO fee_structure VALUES(20,'2026-27','Class 1',1,3000,'01-09-2026')")
+    ensure_student_charges(conn, "2026-27", 1)
+
+    ids = apply_discount(conn, 1, 1, "13000", "Scholarship", 1, "2026-27")
+
+    assert len(ids) == 2
+    assert conn.execute("SELECT SUM(amount) FROM discounts").fetchone()[0] == 13000
+    assert sum(float(row["balance"]) for row in charge_rows(conn, 1, "2026-27")) == 2000

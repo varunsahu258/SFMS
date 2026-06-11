@@ -6,11 +6,12 @@ import inspect
 
 
 def test_discount_applies_exactly_one_ledger_adjustment_and_labels_search():
-    from ui_discount import DiscountWindow
+    from ui_discount import DiscountWindow, apply_discount
 
     save_source = inspect.getsource(DiscountWindow.save)
     build_source = inspect.getsource(DiscountWindow._build_widgets)
-    assert save_source.count("add_adjustment(") == 1
+    assert save_source.count("apply_discount(") == 1
+    assert inspect.getsource(apply_discount).count("add_adjustment(") == 1
     assert 'text="Search Student"' in build_source
 
 

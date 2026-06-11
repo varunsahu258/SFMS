@@ -15,6 +15,41 @@ from ui_collection_common import connect_db, search_students
 from utils import now_str
 
 
+def apply_discount(conn, student_id: int, fee_head_id: int, amount, reason: str,
+                   approved_by: int, academic_year: str | None = None) -> list[int]:
+    """Apply one discount across outstanding charges, oldest due charge first."""
+    year = academic_year or active_academic_year(conn)
+    ensure_student_charges(conn, year, student_id)
+    charges = conn.execute(
+        """SELECT charge_id,balance,due_date FROM charge_ledger
+           WHERE student_id=? AND academic_year=? AND fee_head_id=?
+             AND status<>'CANCELLED' AND balance>0
+           ORDER BY CASE WHEN due_date IS NULL OR due_date='' THEN 1 ELSE 0 END,due_date,charge_id""",
+        (student_id, year, fee_head_id),
+    ).fetchall()
+    total_balance = sum(float(row["balance"] or 0) for row in charges)
+    value = validate_payment_amount(amount, total_balance, maximum=max_payment_amount(conn))
+    remaining = float(value)
+    discount_ids: list[int] = []
+    for charge in charges:
+        if remaining <= 0.005:
+            break
+        allocated = min(remaining, float(charge["balance"] or 0))
+        cursor = conn.execute(
+            """INSERT INTO discounts
+               (student_id,fee_head_id,amount,reason,approved_by,created_at,academic_year,charge_id)
+               VALUES(?,?,?,?,?,?,?,?)""",
+            (student_id, fee_head_id, str(allocated), reason, approved_by, now_str(), year, charge["charge_id"]),
+        )
+        add_adjustment(conn, charge["charge_id"], "DISCOUNT", allocated, "discounts",
+                       cursor.lastrowid, reason, approved_by)
+        discount_ids.append(int(cursor.lastrowid))
+        remaining -= allocated
+    if remaining > 0.005:
+        raise ValueError("No outstanding charge exists for the full discount amount.")
+    return discount_ids
+
+
 class DiscountWindow(WorkspacePage):
     """Admin-only window for creating student fee discounts."""
 
@@ -88,28 +123,13 @@ class DiscountWindow(WorkspacePage):
         if fee_head_id is None or not self.reason_var.get().strip():
             messagebox.showerror("Validation", "Fee head, amount, and reason are required.")
             return
-        with connect_db() as conn:
+        reason = self.reason_var.get().strip()
+        with connect_db() as conn, conn:
             year = active_academic_year(conn)
-            ensure_student_charges(conn, year, self.selected_student_id)
-            charges = conn.execute(
-                "SELECT charge_id,balance,due_date FROM charge_ledger WHERE student_id=? AND academic_year=? AND fee_head_id=? AND status<>'CANCELLED' AND balance>0 ORDER BY due_date,charge_id",
-                (self.selected_student_id, year, fee_head_id),
-            ).fetchall()
-            if not charges:
-                messagebox.showerror("Discount", "No outstanding charge exists for this fee head in the active academic year.", parent=self)
-                return
-            if len(charges) != 1:
-                messagebox.showerror(
-                    "Discount",
-                    "This fee head has multiple term charges. Apply the discount from a charge-specific workflow; no charge was changed.",
-                    parent=self,
-                )
-                return
-            charge = charges[0]
             try:
-                amount = validate_payment_amount(
-                    self.amount_var.get(), charge["balance"],
-                    maximum=max_payment_amount(conn),
+                discount_ids = apply_discount(
+                    conn, self.selected_student_id, fee_head_id, self.amount_var.get(),
+                    reason, auth.CURRENT_SESSION.user_id, year,
                 )
             except OverpaymentError as exc:
                 messagebox.showerror("Discount", str(exc), parent=self)
@@ -117,16 +137,11 @@ class DiscountWindow(WorkspacePage):
             except ValueError as exc:
                 messagebox.showerror("Validation", str(exc), parent=self)
                 return
-            cursor = conn.execute(
-                "INSERT INTO discounts (student_id, fee_head_id, amount, reason, approved_by, created_at, academic_year, charge_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (self.selected_student_id, fee_head_id, str(amount), self.reason_var.get().strip(), auth.CURRENT_SESSION.user_id, now_str(), year, charge["charge_id"]),
-            )
-            add_adjustment(conn, charge["charge_id"], "DISCOUNT", str(amount), "discounts", cursor.lastrowid, self.reason_var.get().strip(), auth.CURRENT_SESSION.user_id)
             log_financial_action(
                 conn, "DISCOUNT_APPLIED", auth.CURRENT_SESSION.user_id,
-                {"table": "discounts", "record_id": cursor.lastrowid,
-                 "student_id": self.selected_student_id, "charge_id": charge["charge_id"],
-                 "amount": str(amount), "reason": self.reason_var.get().strip()},
+                {"table": "discounts", "record_ids": discount_ids,
+                 "student_id": self.selected_student_id, "fee_head_id": fee_head_id,
+                 "amount": self.amount_var.get().strip(), "reason": reason},
             )
 
         messagebox.showinfo("Discount", "Discount saved.")

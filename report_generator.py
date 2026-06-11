@@ -339,6 +339,31 @@ def _save_collection_report_checkpoint(conn, latest: dict[str, int], generated_a
     conn.commit()
 
 
+def discount_report_rows(conn, start_date: str, end_date: str) -> list[dict]:
+    """Return approved discounts for the requested report date range."""
+    start = _parse_date(start_date)
+    end = _parse_date(end_date)
+    if start is None or end is None:
+        raise ValueError("Dates must use DD-MM-YYYY format.")
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if not {"discounts", "students", "fee_heads"} <= tables:
+        return []
+    rows = _row_dicts(conn.execute(
+        """SELECT d.id,d.created_at,d.amount,d.reason,s.name AS student,
+                  fh.name AS fee_head,u.username AS approved_by
+           FROM discounts d JOIN students s ON s.id=d.student_id
+           JOIN fee_heads fh ON fh.id=d.fee_head_id
+           LEFT JOIN users u ON u.id=d.approved_by ORDER BY d.id"""
+    ))
+    result = []
+    for row in rows:
+        parsed = _parse_date(str(row.get("created_at") or "")[:10])
+        if parsed is not None and start <= parsed <= end:
+            row["date"] = parsed.strftime("%d-%m-%Y")
+            result.append(row)
+    return result
+
+
 def collection_report(
     conn, start_date: str, end_date: str, payment_modes: tuple[str, ...],
     include_date: bool = True, include_receipt: bool = False,
@@ -371,6 +396,8 @@ def collection_report(
             title = f"Collection Report — {start_date} to {end_date}"
             period_text = f"Custom date range: {start_date} to {end_date}"
             stem = f"collection_{start_date.replace('-', '')}_{end_date.replace('-', '')}"
+
+    discount_rows = [] if report_kind == "SINCE_LAST" else discount_report_rows(conn, start_date, end_date)
 
     columns: list[tuple[str, str, float]] = []
     if include_date:
@@ -430,6 +457,21 @@ def collection_report(
             styles["right"],
         ))
         story.append(Spacer(1, 4 * mm))
+    story.append(Paragraph("Discounts Approved", styles["heading"]))
+    discount_data = [["Date", "Student", "Fee Head", "Reason", "Amount"]]
+    for row in discount_rows:
+        discount_data.append([row["date"], row["student"], row["fee_head"], row["reason"] or "",
+                              format_currency(row["amount"])])
+    if len(discount_data) == 1:
+        discount_data.append(["", "No discounts approved", "", "", ""])
+    story.append(_table(discount_data, [24 * mm, 42 * mm, 38 * mm, 46 * mm, 28 * mm],
+                        7.2, right_columns=(4,)))
+    story.append(Paragraph(
+        f"Total Discounts: {format_currency(sum(float(row['amount']) for row in discount_rows))}",
+        styles["right"],
+    ))
+    story.append(Spacer(1, 4 * mm))
+
     total = sum(float(row["amount"]) for row in rows)
     story.extend([
         Spacer(1, 5 * mm),

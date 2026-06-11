@@ -136,3 +136,21 @@ def test_custom_historical_report_does_not_move_since_last_checkpoint(tmp_path, 
     assert conn.execute(
         "SELECT value FROM settings WHERE key='collection_report_last_payment_id_cash'"
     ).fetchone() is None
+
+
+def test_daily_collection_report_rows_include_approved_discounts():
+    from report_generator import discount_report_rows
+
+    conn = report_db()
+    conn.executescript("""
+        CREATE TABLE fee_heads(id INTEGER PRIMARY KEY,name TEXT);
+        CREATE TABLE discounts(id INTEGER PRIMARY KEY,student_id INTEGER,fee_head_id INTEGER,
+          amount REAL,reason TEXT,approved_by INTEGER,created_at TEXT);
+        INSERT INTO fee_heads VALUES(1,'Tuition Fee');
+        INSERT INTO discounts VALUES(1,1,1,75,'Scholarship',1,'01-06-2026 10:30:00');
+        INSERT INTO discounts VALUES(2,2,1,25,'Sibling',1,'03-06-2026 09:00:00');
+    """)
+    rows = discount_report_rows(conn, "01-06-2026", "02-06-2026")
+    assert [(row["student"], row["amount"], row["reason"]) for row in rows] == [
+        ("Asha", 75.0, "Scholarship")
+    ]

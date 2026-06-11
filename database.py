@@ -137,6 +137,19 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             FOREIGN KEY (fee_head_id) REFERENCES fee_heads(id)
         );
 
+        CREATE TABLE IF NOT EXISTS installment_schedules (
+            id INTEGER PRIMARY KEY,
+            academic_year TEXT NOT NULL,
+            class_name TEXT NOT NULL,
+            installment_1_due TEXT NOT NULL,
+            installment_2_due TEXT NOT NULL,
+            installment_3_due TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            updated_by INTEGER,
+            UNIQUE(academic_year,class_name),
+            FOREIGN KEY(updated_by) REFERENCES users(id)
+        );
+
         CREATE TABLE IF NOT EXISTS payments (
             id INTEGER PRIMARY KEY,
             student_id INTEGER,
