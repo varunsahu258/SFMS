@@ -29,24 +29,52 @@ class FirstTimeSetupWindow(tk.Toplevel):
         apply_theme(self)
         self.on_complete = on_complete
         self.title("First-Time Setup")
-        self.geometry("470x320")
-        self.resizable(False, False)
+        self.geometry("540x440")
+        self.minsize(500, 400)
+        self.resizable(True, True)
         self.protocol("WM_DELETE_WINDOW", lambda: None)
         self.username = tk.StringVar(value=DEFAULT_ADMIN_USERNAME)
         self.password = tk.StringVar()
         self.confirm = tk.StringVar()
-        frame = ttk.Frame(self, padding=24)
-        frame.pack(fill="both", expand=True)
-        ttk.Label(frame, text="First-Time Setup", font=("Segoe UI", 18, "bold")).pack(anchor="w", pady=(0, 8))
-        ttk.Label(frame, text="Create the owner administrator account before using SFMS.", wraplength=400).pack(anchor="w", pady=(0, 16))
-        for label, variable, show in (
+
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+        content = ttk.Frame(self, padding=(28, 24, 28, 12))
+        content.grid(row=0, column=0, sticky="nsew")
+        content.columnconfigure(0, weight=1)
+        ttk.Label(content, text="First-Time Setup", style="Title.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(0, 8)
+        )
+        ttk.Label(
+            content,
+            text="Create the owner administrator account before using SFMS.",
+            style="Muted.TLabel", wraplength=460,
+        ).grid(row=1, column=0, sticky="w", pady=(0, 18))
+        for row, (label, variable, show) in enumerate((
             ("Administrator username", self.username, ""),
             ("Password", self.password, "*"),
             ("Confirm password", self.confirm, "*"),
-        ):
-            ttk.Label(frame, text=label).pack(anchor="w")
-            ttk.Entry(frame, textvariable=variable, show=show, width=42).pack(anchor="w", pady=(2, 10))
-        ttk.Button(frame, text="Create Admin", command=self._create).pack(fill="x", pady=(8, 0))
+        ), start=2):
+            field = ttk.Frame(content)
+            field.grid(row=row, column=0, sticky="ew", pady=(0, 12))
+            field.columnconfigure(0, weight=1)
+            ttk.Label(field, text=label).grid(row=0, column=0, sticky="w", pady=(0, 4))
+            entry = ttk.Entry(field, textvariable=variable, show=show)
+            entry.grid(row=1, column=0, sticky="ew")
+            if row == 2:
+                entry.focus_set()
+
+        # A dedicated non-expanding footer keeps the save action visible at every
+        # Windows DPI/scaling setting instead of allowing the form to push it away.
+        footer = ttk.Frame(self, padding=(28, 12, 28, 24))
+        footer.grid(row=1, column=0, sticky="ew")
+        footer.columnconfigure(0, weight=1)
+        self.create_button = ttk.Button(
+            footer, text="Create Administrator and Continue",
+            command=self._create, style="Accent.TButton",
+        )
+        self.create_button.grid(row=0, column=0, sticky="ew")
+        self.bind("<Return>", lambda _event: self._create())
 
     def _create(self) -> None:
         ok, message = validate_bootstrap_password(self.password.get())
