@@ -14,6 +14,8 @@ LABELS = {
         "save": "Save", "cancel": "Cancel", "general": "General", "appearance": "Appearance",
         "security": "Security", "data": "Data", "language": "Language", "theme": "Theme",
         "light": "Light", "dark": "Dark", "english": "English", "hindi": "Hindi",
+        "timetable": "Timetable", "timetable_setup": "Timetable Setup",
+        "generate_timetable": "Generate Timetable", "view_timetable": "View Timetable",
     },
     "hi": {
         "login": "लॉगिन", "username": "उपयोगकर्ता नाम", "password": "पासवर्ड", "show": "दिखाएँ",
@@ -28,6 +30,8 @@ LABELS = {
         "save": "सहेजें", "cancel": "रद्द करें", "general": "सामान्य", "appearance": "रूप-रंग",
         "security": "सुरक्षा", "data": "डेटा", "language": "भाषा", "theme": "थीम",
         "light": "हल्का", "dark": "गहरा", "english": "अंग्रेज़ी", "hindi": "हिन्दी",
+        "timetable": "समय-सारणी", "timetable_setup": "समय-सारणी व्यवस्था",
+        "generate_timetable": "समय-सारणी बनाएँ", "view_timetable": "समय-सारणी देखें",
     },
 }
 

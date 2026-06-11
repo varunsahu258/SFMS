@@ -9,6 +9,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 import auth
+from ui_workspace import WorkspacePage
 from config import DB_PATH, SPLASH_BG, SPLASH_FG
 from ledger import active_academic_year, charge_rows
 from money import OverpaymentError, max_payment_amount, validate_payment_amount
@@ -156,7 +157,7 @@ class UPIDetailDialog(tk.Toplevel):
         self.destroy()
 
 
-class CollectionBaseWindow(tk.Toplevel):
+class CollectionBaseWindow(WorkspacePage):
     """Base window for BIG/SMALL/exemption fee collection flows."""
 
     register_types: tuple[str, ...] = ("BIG", "BOTH")
@@ -164,9 +165,9 @@ class CollectionBaseWindow(tk.Toplevel):
     max_rows: int | None = None
     force_exemption_view = False
 
-    def __init__(self, master=None):
+    def __init__(self, master=None, *, embedded: bool = False):
         """Create the shared fee collection screen."""
-        super().__init__(master)
+        super().__init__(master, embedded=embedded)
         self.title(f"{self.receipt_type} Fee Collection")
         self.geometry("1040x640")
         self.configure(bg=SPLASH_BG)
@@ -229,7 +230,9 @@ class CollectionBaseWindow(tk.Toplevel):
         self.mode_vars.clear()
         with connect_db() as conn:
             self.fee_items = fee_rows(conn, self.selected_student_id, self.register_types, self.force_exemption_view)
-        if self.max_rows is not None:
+        hidden_count = 0
+        if self.max_rows is not None and len(self.fee_items) > self.max_rows:
+            hidden_count = len(self.fee_items) - self.max_rows
             self.fee_items = self.fee_items[: self.max_rows]
         headers = ("Fee Head", "Outstanding", "Paid", "Discount / Exemption", "Amount Paying", "Mode", "Status")
         for column, header in enumerate(headers):
@@ -250,6 +253,14 @@ class CollectionBaseWindow(tk.Toplevel):
             combo.bind("<<ComboboxSelected>>", lambda _event, charge_id=item["charge_id"]: self.capture_mode_detail(charge_id))
             status = "EXEMPT" if item["is_exempt"] else ""
             tk.Label(self.fee_frame, text=status, bg=SPLASH_BG, fg="#999999" if status else SPLASH_FG).grid(row=row_index, column=6, padx=4, pady=4)
+        if hidden_count:
+            tk.Label(
+                self.fee_frame,
+                text=(f"{hidden_count} additional fee head(s) are not shown in Small Collection. "
+                      "Use Main Collection to view and collect every outstanding head."),
+                bg="#fff3cd", fg="#6b4f00", font=("Segoe UI", 10, "bold"),
+                anchor="w", justify="left", padx=10, pady=8,
+            ).grid(row=len(self.fee_items) + 1, column=0, columnspan=7, sticky="ew", padx=4, pady=(10, 4))
         self.update_summary()
 
     def capture_mode_detail(self, charge_id: int) -> None:
