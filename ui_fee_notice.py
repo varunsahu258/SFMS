@@ -8,6 +8,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 import auth
+from ui_workspace import WorkspacePage
 from config import DB_PATH, SPLASH_BG, SPLASH_FG
 from report_generator import fee_notice_pdf
 
@@ -21,13 +22,13 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
-class FeeNoticeWindow(tk.Toplevel):
+class FeeNoticeWindow(WorkspacePage):
     """Generate one-page-per-student fee notices for a selected class."""
 
-    @auth.require_role("ADMIN")
-    def __init__(self, master=None):
+    @auth.require_permission("issue_fee_notices")
+    def __init__(self, master=None, *, embedded: bool = False):
         """Create the class selector and generation action."""
-        super().__init__(master)
+        super().__init__(master, embedded=embedded)
         self.title("Fee Notices")
         self.geometry("460x250")
         self.configure(bg=SPLASH_BG)

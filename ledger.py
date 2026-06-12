@@ -202,6 +202,11 @@ def ensure_student_charges(
 ) -> None:
     """Create one immutable charge for each matching student fee-structure row."""
     conditions = ["fs.academic_year = COALESCE(?, fs.academic_year)", "s.is_active = 1"]
+    if "is_one_time" in _columns(conn, "fee_heads"):
+        conditions.append(
+            "NOT EXISTS (SELECT 1 FROM fee_heads fh "
+            "WHERE fh.id=fs.fee_head_id AND COALESCE(fh.is_one_time,0)=1)"
+        )
     params: list = [academic_year]
     if student_id is not None:
         conditions.append("s.id = ?")

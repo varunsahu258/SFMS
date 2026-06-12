@@ -9,6 +9,8 @@ from datetime import datetime
 from tkinter import messagebox, ttk
 
 import auth
+from ui_workspace import WorkspacePage
+from ui_date import DateEntry
 from config import DB_PATH, SPLASH_BG, SPLASH_FG
 from report_generator import audit_export
 
@@ -36,13 +38,13 @@ def _parse_date(value: str) -> datetime | None:
     raise ValueError("Dates must use DD-MM-YYYY format.")
 
 
-class AuditLogWindow(tk.Toplevel):
+class AuditLogWindow(WorkspacePage):
     """Filter, inspect, and export immutable audit-log records."""
 
-    @auth.require_role("ADMIN")
-    def __init__(self, master=None):
+    @auth.require_permission("view_audit_log")
+    def __init__(self, master=None, *, embedded: bool = False):
         """Create the administrator-only audit viewer."""
-        super().__init__(master)
+        super().__init__(master, embedded=embedded)
         self.title("Audit Log")
         self.geometry("1220x650")
         self.configure(bg=SPLASH_BG)
@@ -66,7 +68,7 @@ class AuditLogWindow(tk.Toplevel):
             ("Date To", self.date_to_var, 13),
         ):
             tk.Label(filters, text=label, bg=SPLASH_BG, fg=SPLASH_FG).pack(side="left", padx=(6, 2))
-            ttk.Entry(filters, textvariable=variable, width=width).pack(side="left")
+            DateEntry(filters, textvariable=variable, width=width).pack(side="left")
         tk.Label(filters, text="Username", bg=SPLASH_BG, fg=SPLASH_FG).pack(side="left", padx=(10, 2))
         self.user_combo = ttk.Combobox(filters, textvariable=self.username_var, state="readonly", width=16)
         self.user_combo.pack(side="left")

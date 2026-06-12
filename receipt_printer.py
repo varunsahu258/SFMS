@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 import qrcode
@@ -16,18 +17,71 @@ from reportlab.pdfgen import canvas
 
 import auth
 from audit import log_action
-from config import RECEIPTS_DIR, SCHOOL_NAME
+from config import RECEIPT_ISSUER_NAME, RECEIPTS_DIR, SCHOOL_NAME
 from utils import format_currency, now_str
 
 MARGIN = 20 * 72 / 25.4
 FONT = "Helvetica"
 FONT_BOLD = "Helvetica-Bold"
 WATERMARK_COLOR = colors.HexColor("#cccccc")
+LATE_FEE_NOTICE = "Note: Late fees will apply if dues are not cleared by the due date."
 
 
 def _settings(conn) -> dict[str, str]:
     """Return application settings as a key/value dictionary."""
     return {str(row[0]): str(row[1] or "") for row in conn.execute("SELECT key, value FROM settings")}
+
+
+def _parse_due_date(value: object) -> datetime | None:
+    """Parse the date formats used by charge and installment records."""
+    text = str(value or "").strip()
+    for date_format in ("%d-%m-%Y", "%Y-%m-%d", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(text, date_format)
+        except ValueError:
+            continue
+    return None
+
+
+def _outstanding_summary(conn, student_id: int, payments: list[dict]) -> tuple[float, str]:
+    """Return total positive dues and their earliest due date across every fee head."""
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table','view')")}
+    ledger_columns = (
+        {row[1] for row in conn.execute("PRAGMA table_info(charge_ledger)")}
+        if "charge_ledger" in tables else set()
+    )
+    if {"student_id", "balance"}.issubset(ledger_columns):
+        selected = ["balance"]
+        if "due_date" in ledger_columns:
+            selected.append("due_date")
+        else:
+            selected.append("NULL AS due_date")
+        conditions = ["student_id=?", "balance>0"]
+        if "status" in ledger_columns:
+            conditions.append("COALESCE(status,'OPEN')<>'CANCELLED'")
+        rows = conn.execute(
+            f"SELECT {','.join(selected)} FROM charge_ledger WHERE {' AND '.join(conditions)}",
+            (student_id,),
+        ).fetchall()
+        total = sum(float(row[0] or 0) for row in rows)
+        dated = [(parsed, str(row[1])) for row in rows if (parsed := _parse_due_date(row[1]))]
+        earliest_due = min(dated, key=lambda item: item[0])[1] if dated else ""
+        return total, earliest_due
+
+    # Compatibility fallback for legacy databases that predate the student-aware ledger view.
+    return sum(max(float(payment.get("balance") or 0), 0) for payment in payments), ""
+
+
+def _receipt_due_lines(data: dict) -> list[str]:
+    """Build the requested balance, due-date, and late-fee lines in display order."""
+    balance = float(data.get("overall_balance") or 0)
+    if balance <= 0:
+        return []
+    lines = [f"Total Outstanding Balance: {format_currency(balance)}"]
+    due_date = str(data.get("overall_due_date") or "").strip()
+    if due_date:
+        lines.extend((f"Due Date: {due_date}", LATE_FEE_NOTICE))
+    return lines
 
 
 def _receipt_data(conn, receipt_no: str) -> dict:
@@ -55,25 +109,15 @@ def _receipt_data(conn, receipt_no: str) -> dict:
     }
     has_intent = "payment_intent" in payment_columns_available
     has_years = "allocated_academic_year_id" in payment_columns_available and "academic_years" in tables_available
-    has_ledger = {"payment_allocations", "charge_ledger"}.issubset(tables_available)
     has_cheque_tracker = "cheque_tracker" in tables_available
     intent_columns = (
         "p.payment_intent,p.allocated_term,ay.label AS allocated_academic_year,"
         if has_intent and has_years else
         "'REGULAR' AS payment_intent,NULL AS allocated_term,NULL AS allocated_academic_year,"
     )
-    amount_due_expr = "COALESCE(l.original_amount,p.amount_due)" if has_ledger else "p.amount_due"
-    if has_ledger:
-        balance_expr = "COALESCE(l.balance,0)"
-    elif "balance" in payment_columns_available:
-        balance_expr = "COALESCE(p.balance,0)"
-    else:
-        balance_expr = "0"
-    ledger_join = (
-        "LEFT JOIN payment_allocations pa ON pa.payment_id=p.id "
-        "LEFT JOIN charge_ledger l ON l.charge_id=pa.charge_id"
-        if has_ledger else ""
-    )
+    amount_due_expr = "COALESCE(p.amount_due,0)"
+    balance_expr = "COALESCE(p.balance,0)" if "balance" in payment_columns_available else "0"
+    ledger_join = ""
     year_join = "LEFT JOIN academic_years ay ON ay.id=p.allocated_academic_year_id" if has_intent and has_years else ""
     cheque_columns = (
         "ct.cheque_no, ct.bank"
@@ -81,11 +125,13 @@ def _receipt_data(conn, receipt_no: str) -> dict:
         f"{'p.cheque_number' if 'cheque_number' in payment_columns_available else 'NULL'} AS cheque_no, NULL AS bank"
     )
     cheque_join = "LEFT JOIN cheque_tracker ct ON ct.payment_id = p.id" if has_cheque_tracker else ""
+    upi_reference_expr = "p.upi_reference" if "upi_reference" in payment_columns_available else "NULL AS upi_reference"
     payment_cursor = conn.execute(
         f"""
         SELECT p.id, p.fee_head_id, {amount_due_expr} AS amount_due,
                p.amount_paid, {balance_expr} AS balance,
-               p.payment_date, p.payment_mode, p.note, {intent_columns} fh.name AS fee_head,
+               p.payment_date, p.payment_mode, p.note,
+               {upi_reference_expr}, {intent_columns} fh.name AS fee_head,
                u.username AS collected_by_name, {cheque_columns}
         FROM payments p
         {ledger_join}
@@ -104,6 +150,22 @@ def _receipt_data(conn, receipt_no: str) -> dict:
         raise ValueError(f"Receipt {receipt_no} has no payment rows.")
 
     receipt_values["payments"] = payments
+    fee_head_columns = {row[1] for row in conn.execute("PRAGMA table_info(fee_heads)")} if "fee_heads" in tables_available else set()
+    fee_head_conditions = []
+    if "is_active" in fee_head_columns:
+        fee_head_conditions.append("is_active=1")
+    if "register_type" in fee_head_columns:
+        register = "SMALL" if str(receipt_values.get("receipt_type") or "").upper() == "SMALL" else "BIG"
+        fee_head_conditions.append(f"register_type IN ('{register}','BOTH')")
+    where_clause = f" WHERE {' AND '.join(fee_head_conditions)}" if fee_head_conditions else ""
+    receipt_values["all_fee_heads"] = [
+        str(row[0]) for row in conn.execute(f"SELECT name FROM fee_heads{where_clause} ORDER BY id")
+    ] if "fee_heads" in tables_available else []
+    overall_balance, overall_due_date = _outstanding_summary(
+        conn, int(receipt_values["student_id"]), payments
+    )
+    receipt_values["overall_balance"] = overall_balance
+    receipt_values["overall_due_date"] = overall_due_date
     return receipt_values
 
 
@@ -126,7 +188,7 @@ def _payment_mode_text(payments: list[dict]) -> str:
         if mode == "CHEQUE":
             value = f"Cheque No. {payment.get('cheque_no') or ''}".strip()
         elif mode == "UPI":
-            value = f"UPI Ref {payment.get('note') or ''}".strip()
+            value = f"UPI Ref {payment.get('upi_reference') or payment.get('note') or ''}".strip()
         else:
             value = mode.title() or "Cash"
         if value not in details:
@@ -199,55 +261,82 @@ def _draw_copy(
 
     table_top = info_y - 31
     col1 = left
-    col2 = x + width * 0.61
+    col2 = x + width * 0.67
     col3 = right
+    explicit_collection = any(
+        str(payment.get("note") or "").startswith(("MAIN COLLECTION", "SMALL COLLECTION"))
+        for payment in data["payments"]
+    )
     pdf.setFont(FONT_BOLD, 8.5)
     pdf.line(left, table_top + 4, right, table_top + 4)
     pdf.drawString(col1, table_top - 7, "Fee Head")
-    pdf.drawRightString(col2 + 25, table_top - 7, "Amount Due")
+    if not explicit_collection:
+        pdf.drawRightString(col2, table_top - 7, "Amount Due")
     pdf.drawRightString(col3, table_top - 7, "Amount Paid")
     pdf.line(left, table_top - 12, right, table_top - 12)
 
     row_y = table_top - 26
-    total_due = 0.0
-    total_paid = 0.0
-    total_balance = 0.0
-    max_rows = max(1, int((height - 155) // 14))
-    visible_payments = data["payments"][:max_rows]
+    total_paid = sum(float(payment.get("amount_paid") or 0) for payment in data["payments"])
     pdf.setFont(FONT, 8.5)
-    for payment in visible_payments:
-        due = float(payment.get("amount_due") or 0)
-        paid = float(payment.get("amount_paid") or 0)
-        total_due += due
-        total_paid += paid
-        total_balance += float(payment.get("balance") or 0)
-        pdf.drawString(col1, row_y, _fit_text(payment.get("fee_head") or "Fee", width * 0.46, FONT, 8.5))
-        pdf.drawRightString(col2 + 25, row_y, format_currency(due))
-        pdf.drawRightString(col3, row_y, format_currency(paid))
-        row_y -= 14
 
-    for payment in data["payments"][max_rows:]:
-        total_due += float(payment.get("amount_due") or 0)
-        total_paid += float(payment.get("amount_paid") or 0)
-        total_balance += float(payment.get("balance") or 0)
+    if explicit_collection:
+        fee_heads = data.get("all_fee_heads") or [
+            str(payment.get("fee_head") or "Fee") for payment in data["payments"]
+        ]
+        paid_by_head: dict[str, float] = {}
+        for payment in data["payments"]:
+            head = str(payment.get("fee_head") or "Fee")
+            paid_by_head[head] = paid_by_head.get(head, 0.0) + float(payment.get("amount_paid") or 0)
+        max_rows = max(1, int((height - 220) // 14))
+        for fee_head in fee_heads[:max_rows]:
+            pdf.drawString(col1, row_y, _fit_text(fee_head, width * 0.58, FONT, 8.5))
+            paid = paid_by_head.get(fee_head, 0.0)
+            pdf.drawRightString(col3, row_y, format_currency(paid) if paid else "")
+            row_y -= 14
+    else:
+        max_rows = max(1, int((height - 220) // 14))
+        for payment in data["payments"][:max_rows]:
+            due = float(payment.get("amount_due") or 0)
+            paid = float(payment.get("amount_paid") or 0)
+            pdf.drawString(col1, row_y, _fit_text(payment.get("fee_head") or "Fee", width * 0.52, FONT, 8.5))
+            pdf.drawRightString(col2, row_y, format_currency(due))
+            pdf.drawRightString(col3, row_y, format_currency(paid))
+            row_y -= 14
 
     pdf.line(left, row_y + 5, right, row_y + 5)
     pdf.setFont(FONT_BOLD, 9)
-    pdf.drawString(col1, row_y - 7, "TOTAL")
-    pdf.drawRightString(col2 + 25, row_y - 7, format_currency(total_due))
+    pdf.drawString(col1, row_y - 7, "TOTAL PAID")
     pdf.drawRightString(col3, row_y - 7, format_currency(total_paid))
 
-    footer_y = y + 28
-    pdf.setFont(FONT, 8.5)
-    if total_balance > 0:
-        pdf.drawString(left, footer_y + 14, f"Balance: {format_currency(total_balance)}")
+    due_lines = _receipt_due_lines(data)
+    for line_index, line in enumerate(due_lines):
+        font_name = FONT_BOLD if line_index == 0 else FONT
+        font_size = 8.2 if line_index < 2 else 7.2
+        pdf.setFont(font_name, font_size)
+        pdf.drawString(
+            left, row_y - 22 - (line_index * 12),
+            _fit_text(line, width - 20, font_name, font_size),
+        )
+
+    footer_y = y + 27
+    pdf.setFont(FONT, 8.2)
     advance = next((payment for payment in data["payments"] if payment.get("payment_intent") == "ADVANCE"), None)
+    payment_text = f"Payment Mode: {_payment_mode_text(data['payments'])}"
     if advance:
-        pdf.drawString(left, footer_y + 14, _fit_text(
-            f"Allocated: {advance.get('allocated_academic_year') or ''} / {advance.get('allocated_term') or ''}",
-            width - 85, FONT, 8.5))
-    pdf.drawString(left, footer_y, _fit_text(f"Payment Mode: {_payment_mode_text(data['payments'])}", width - 85, FONT, 8.5))
-    pdf.drawImage(qr_reader, right - 48, y + 8, width=42, height=42, preserveAspectRatio=True, mask="auto")
+        payment_text += (
+            f"   |   Allocated: {advance.get('allocated_academic_year') or ''} / "
+            f"{advance.get('allocated_term') or ''}"
+        )
+    pdf.drawString(left, footer_y + 2, _fit_text(payment_text, width * 0.58, FONT, 8.2))
+
+    issuer_name = settings.get("receipt_issuer_name") or RECEIPT_ISSUER_NAME
+    pdf.setFont(FONT, 7.5)
+    signature_x = x + width * 0.62
+    pdf.line(signature_x - 35, footer_y + 22, signature_x + 45, footer_y + 22)
+    pdf.drawCentredString(signature_x + 5, footer_y + 12, _fit_text(issuer_name, 100, FONT, 7.5))
+    pdf.drawCentredString(signature_x + 5, footer_y + 2, _fit_text(school_name, 125, FONT, 7.5))
+    pdf.drawCentredString(right - 27, footer_y + 2, "School Seal")
+    pdf.drawImage(qr_reader, right - 48, footer_y + 8, width=42, height=42, preserveAspectRatio=True, mask="auto")
 
 
 def _open_pdf(pdf_path: str) -> None:
@@ -314,21 +403,17 @@ def print_receipt(conn, receipt_no, reprint=False, reprint_reason: str | None = 
         if reprint:
             _draw_watermark(pdf, page_width, page_height)
 
-        if str(data.get("receipt_type") or "BIG").upper() == "SMALL":
-            panel_y = page_height / 2
-            panel_height = page_height / 2 - MARGIN
-            available_width = page_width - 2 * MARGIN
-            panel_width = available_width / 2
-            _draw_copy(pdf, data, settings, qr_reader, MARGIN, panel_y, panel_width, panel_height, "SCHOOL COPY")
-            _draw_copy(pdf, data, settings, qr_reader, MARGIN + panel_width, panel_y, panel_width, panel_height, "PARENT COPY")
-        else:
-            half_height = page_height / 2
-            _draw_copy(pdf, data, settings, qr_reader, MARGIN, half_height + 8, page_width - 2 * MARGIN, half_height - MARGIN - 8, "SCHOOL COPY")
-            pdf.saveState()
-            pdf.setDash(2, 3)
-            pdf.line(MARGIN, half_height, page_width - MARGIN, half_height)
-            pdf.restoreState()
-            _draw_copy(pdf, data, settings, qr_reader, MARGIN, MARGIN, page_width - 2 * MARGIN, half_height - MARGIN - 8, "PARENT COPY")
+        # Main and Small registers deliberately share the exact same receipt layout;
+        # register identity remains stored in receipts.receipt_type for reports/audit.
+        half_height = page_height / 2
+        _draw_copy(pdf, data, settings, qr_reader, MARGIN, half_height + 8,
+                   page_width - 2 * MARGIN, half_height - MARGIN - 8, "SCHOOL COPY")
+        pdf.saveState()
+        pdf.setDash(2, 3)
+        pdf.line(MARGIN, half_height, page_width - MARGIN, half_height)
+        pdf.restoreState()
+        _draw_copy(pdf, data, settings, qr_reader, MARGIN, MARGIN,
+                   page_width - 2 * MARGIN, half_height - MARGIN - 8, "PARENT COPY")
 
         pdf.showPage()
         pdf.save()
