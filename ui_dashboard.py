@@ -204,6 +204,7 @@ class DashboardWindow(tk.Toplevel):
                     ("reports", "view_reports", "Reports", "Daily, collection and dues reports.", self._on_reports_click),
                     ("notices", "issue_fee_notices", "Fee Notices", "Generate fee notices.", self._on_fee_notices_click),
                     ("fee_structure", "manage_fee_structure", "Fee Structures", "Configure fees and installments.", self._on_fee_structure_click),
+                    ("opening_balances", "manage_opening_balances", "Old Opening Balances", "Import unpaid dues from manual records before SFMS.", self._on_opening_balances_click),
                     ("fee_heads", "manage_fee_heads", "Fee Heads", "Manage fee categories.", self._on_fee_heads_click),
                     ("late_fees", "apply_late_fees", "Late Fees", "Assess overdue installment charges.", self._on_late_fees_click),
                     ("discounts", "manage_discounts", "Discounts", "Apply audited fee discounts.", self._on_discount_click),
@@ -767,6 +768,14 @@ class DashboardWindow(tk.Toplevel):
         from ui_dues import DuesWindow
 
         self._show_workspace_page(DuesWindow, "Student Dues", "dues")
+
+    @auth.require_permission("manage_opening_balances")
+    def _on_opening_balances_click(self) -> None:
+        """Open audited prior-year balance migration."""
+        auth.touch_session()
+        from ui_opening_balances import OpeningBalanceWindow
+
+        self._show_workspace_page(OpeningBalanceWindow, "Old Opening Balances", "opening_balances")
 
     @auth.require_permission("manage_discounts")
     def _on_discount_click(self) -> None:

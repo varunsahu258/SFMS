@@ -66,24 +66,24 @@ def student_dues_register(conn, student_id: int) -> dict:
         ensure_student_charges(conn, year, student_id)
     events: list[dict] = []
     charges = conn.execute(
-        """SELECT c.id,c.original_amount,c.due_date,c.created_at,c.status,fh.name fee_head
+        """SELECT c.id,c.academic_year,c.original_amount,c.due_date,c.created_at,c.status,fh.name fee_head
            FROM student_charges c JOIN fee_heads fh ON fh.id=c.fee_head_id
            WHERE c.student_id=? ORDER BY c.id""", (student_id,),
     ).fetchall()
     for row in charges:
         event_date = row["created_at"] or row["due_date"] or ""
-        events.append({"date": event_date, "type": "CHARGE",
+        events.append({"date": event_date, "academic_year": row["academic_year"], "type": "CHARGE",
                        "reference": f"Charge #{row['id']}", "description": f"{row['fee_head']} (due {row['due_date'] or 'not set'})",
                        "debit": float(row["original_amount"] or 0), "credit": 0.0,
                        "_sort_at": _event_time(event_date, row["created_at"]), "_sequence": (0, int(row["id"]))})
     adjustments = conn.execute(
-        """SELECT a.id,a.amount,a.adjustment_type,a.reason,a.created_at,fh.name fee_head
+        """SELECT a.id,a.amount,a.adjustment_type,a.reason,a.created_at,c.academic_year,fh.name fee_head
            FROM charge_adjustments a JOIN student_charges c ON c.id=a.charge_id
            JOIN fee_heads fh ON fh.id=c.fee_head_id WHERE c.student_id=? ORDER BY a.id""", (student_id,),
     ).fetchall()
     for row in adjustments:
         event_date = row["created_at"] or ""
-        events.append({"date": event_date, "type": row["adjustment_type"],
+        events.append({"date": event_date, "academic_year": row["academic_year"], "type": row["adjustment_type"],
                        "reference": f"Adjustment #{row['id']}",
                        "description": f"{row['fee_head']}: {row['reason'] or row['adjustment_type'].title()}",
                        "debit": 0.0, "credit": float(row["amount"] or 0),
@@ -91,7 +91,7 @@ def student_dues_register(conn, student_id: int) -> dict:
     allocation_timestamp = "a.created_at" if _has_column(conn, "payment_allocations", "created_at") else "NULL"
     payments = conn.execute(
         f"""SELECT p.id,a.id allocation_id,p.receipt_no,p.payment_date,p.payment_mode,p.note,a.amount_allocated,
-                   a.allocation_type,fh.name fee_head,{allocation_timestamp} allocation_created_at
+                   a.allocation_type,c.academic_year,fh.name fee_head,{allocation_timestamp} allocation_created_at
             FROM payment_allocations a JOIN payments p ON p.id=a.payment_id
             JOIN student_charges c ON c.id=a.charge_id JOIN fee_heads fh ON fh.id=c.fee_head_id
             WHERE p.student_id=? ORDER BY p.id,a.id""", (student_id,),
@@ -101,7 +101,8 @@ def student_dues_register(conn, student_id: int) -> dict:
         amount = float(row["amount_allocated"] or 0)
         event_date = row["payment_date"] or row["allocation_created_at"] or ""
         display_date = _display_event_date(event_date, row["allocation_created_at"])
-        events.append({"date": display_date, "type": "VOID/REVERSAL" if reversal else "PAYMENT",
+        events.append({"date": display_date, "academic_year": row["academic_year"],
+                       "type": "VOID/REVERSAL" if reversal else "PAYMENT",
                        "reference": row["receipt_no"] or f"Payment #{row['id']}",
                        "description": f"{row['fee_head']} • {row['payment_mode'] or ''}{' • ' + row['note'] if row['note'] else ''}",
                        "debit": amount if reversal else 0.0, "credit": 0.0 if reversal else amount,
@@ -151,12 +152,13 @@ class DuesRegisterWindow(WorkspacePage):
         self.students.bind("<<TreeviewSelect>>", self.load)
         self.summary = ttk.Label(page, text="Select a student.", style="Muted.TLabel", wraplength=1120, justify="left")
         self.summary.pack(fill="x", pady=(2, 8))
-        columns = ("date", "type", "reference", "description", "debit", "credit", "balance")
+        columns = ("date", "academic_year", "type", "reference", "description", "debit", "credit", "balance")
         events_frame = ttk.Frame(page)
         events_frame.pack(fill="both", expand=True)
         self.events = ttk.Treeview(events_frame, columns=columns, show="headings")
-        for key, heading, width in (("date", "Date", 135), ("type", "Entry", 110), ("reference", "Receipt / Ref", 150),
-                                    ("description", "Details", 360), ("debit", "Debit", 100),
+        for key, heading, width in (("date", "Date", 135), ("academic_year", "Academic Year", 105),
+                                    ("type", "Entry", 105), ("reference", "Receipt / Ref", 135),
+                                    ("description", "Details", 300), ("debit", "Debit", 95),
                                     ("credit", "Credit", 100), ("balance", "Running Balance", 120)):
             self.events.heading(key, text=heading); self.events.column(key, width=width, anchor="w")
         event_scroll = ttk.Scrollbar(events_frame, orient="vertical", command=self.events.yview)
@@ -195,6 +197,7 @@ class DuesRegisterWindow(WorkspacePage):
         balance = 0.0
         for index, event in enumerate(register["events"]):
             balance += event["debit"] - event["credit"]
-            self.events.insert("", "end", iid=str(index), values=(event["date"], event["type"], event["reference"],
+            self.events.insert("", "end", iid=str(index), values=(event["date"], event.get("academic_year", ""),
+                event["type"], event["reference"],
                 event["description"], format_currency(event["debit"]) if event["debit"] else "",
                 format_currency(event["credit"]) if event["credit"] else "", format_currency(balance)))

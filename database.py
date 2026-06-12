@@ -150,6 +150,22 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             FOREIGN KEY(updated_by) REFERENCES users(id)
         );
 
+        CREATE TABLE IF NOT EXISTS opening_balances (
+            id INTEGER PRIMARY KEY,
+            student_id INTEGER NOT NULL,
+            academic_year TEXT NOT NULL,
+            amount REAL NOT NULL CHECK(amount > 0),
+            due_date TEXT,
+            note TEXT,
+            charge_id INTEGER NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            created_by INTEGER NOT NULL,
+            UNIQUE(student_id,academic_year),
+            FOREIGN KEY(student_id) REFERENCES students(id),
+            FOREIGN KEY(charge_id) REFERENCES student_charges(id),
+            FOREIGN KEY(created_by) REFERENCES users(id)
+        );
+
         CREATE TABLE IF NOT EXISTS payments (
             id INTEGER PRIMARY KEY,
             student_id INTEGER,

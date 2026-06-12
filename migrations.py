@@ -495,6 +495,31 @@ def migration_v015_installment_schedules(conn: sqlite3.Connection) -> None:
     )
 
 
+def migration_v016_opening_balances(conn: sqlite3.Connection) -> None:
+    """Store immutable balances imported from pre-SFMS manual records."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS opening_balances(
+            id INTEGER PRIMARY KEY,
+            student_id INTEGER NOT NULL,
+            academic_year TEXT NOT NULL,
+            amount REAL NOT NULL CHECK(amount > 0),
+            due_date TEXT,
+            note TEXT,
+            charge_id INTEGER NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            created_by INTEGER NOT NULL,
+            UNIQUE(student_id,academic_year),
+            FOREIGN KEY(student_id) REFERENCES students(id),
+            FOREIGN KEY(charge_id) REFERENCES student_charges(id),
+            FOREIGN KEY(created_by) REFERENCES users(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_opening_balances_student_year
+            ON opening_balances(student_id,academic_year);
+        """
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     ("v001_base_settings", migration_v001_base_settings),
     ("v002_setup_defaults", migration_v002_setup_defaults),
@@ -511,6 +536,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     ("v013_late_fees", migration_v013_late_fees),
     ("v014_admissions", migration_v014_admissions),
     ("v015_installment_schedules", migration_v015_installment_schedules),
+    ("v016_opening_balances", migration_v016_opening_balances),
 )
 
 

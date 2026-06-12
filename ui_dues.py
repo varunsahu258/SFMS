@@ -17,8 +17,8 @@ from ui_collection_common import connect_db
 from utils import format_currency, today_str
 
 
-def aggregate_student_dues(rows: list[dict]) -> list[dict]:
-    """Collapse fee-head balances into one authoritative total per student."""
+def aggregate_student_dues(rows: list[dict], current_year: str = "") -> list[dict]:
+    """Collapse all academic-year and fee-head balances into totals per student."""
     students: dict[int, dict] = {}
     for row in rows:
         student_id = int(row["student_id"])
@@ -34,10 +34,20 @@ def aggregate_student_dues(rows: list[dict]) -> list[dict]:
             "aadhaar": row.get("aadhaar") or "",
             "phone": row.get("phone") or "",
             "mobile2": row.get("mobile2") or "",
+            "current_year_due": 0.0,
+            "previous_year_due": 0.0,
             "total_due": 0.0,
+            "academic_year_totals": {},
             "oldest_due_date": "",
         })
-        item["total_due"] += float(row.get("outstanding") or 0)
+        outstanding = float(row.get("outstanding") or 0)
+        academic_year = str(row.get("academic_year") or "Unspecified")
+        item["total_due"] += outstanding
+        item["academic_year_totals"][academic_year] = item["academic_year_totals"].get(academic_year, 0.0) + outstanding
+        if current_year and academic_year == current_year:
+            item["current_year_due"] += outstanding
+        else:
+            item["previous_year_due"] += outstanding
         if due_date and (
             not item["oldest_due_date"]
             or _due_date_sort_key(due_date) < _due_date_sort_key(item["oldest_due_date"])
@@ -100,13 +110,14 @@ class DuesWindow(WorkspacePage):
         self.export_button.pack(side="right")
         ttk.Button(top, text="Print Selected Statements", command=self.print_student_statement).pack(side="right", padx=4)
         ttk.Button(top, text="Issue TC", command=self.issue_tc).pack(side="right", padx=4)
-        columns = ("scholar_no", "student", "father_name", "class", "total_due", "due_date", "days")
+        columns = ("scholar_no", "student", "father_name", "class", "previous_due", "current_due", "total_due", "due_date", "days")
         self.tree = ttk.Treeview(self, columns=columns, show="headings")
         for column, heading, width in (
             ("scholar_no", "Scholar No.", 105), ("student", "Student", 210),
             ("father_name", "Father's Name", 210),
-            ("class", "Class / Section", 140), ("total_due", "Total Due", 130),
-            ("due_date", "Due On", 120), ("days", "Days Overdue", 110),
+            ("class", "Class / Section", 125), ("previous_due", "Previous Years", 115),
+            ("current_due", "Current Year", 115), ("total_due", "Total Due", 120),
+            ("due_date", "Due On", 110), ("days", "Days Overdue", 100),
         ):
             self.tree.heading(column, text=heading)
             self.tree.column(column, width=width)
@@ -134,7 +145,7 @@ class DuesWindow(WorkspacePage):
         with connect_db() as conn:
             year = active_academic_year(conn)
             ensure_student_charges(conn, year)
-            rows = aggregate_student_dues(LedgerService(conn).get_all_outstanding(year))
+            rows = aggregate_student_dues(LedgerService(conn).get_all_outstanding(), year)
             search = self.search_var.get().strip().casefold()
             if search:
                 existing_ids = {row["student_id"] for row in rows}
@@ -149,7 +160,8 @@ class DuesWindow(WorkspacePage):
                         "scholar_no": student["scholar_no"] or "", "father_name": student["father_name"] or "",
                         "address": student["address"] or "", "aadhaar": student["aadhaar"] or "",
                         "phone": student["phone"] or "", "mobile2": student["mobile2"] or "",
-                        "total_due": 0.0, "oldest_due_date": "",
+                        "current_year_due": 0.0, "previous_year_due": 0.0,
+                        "total_due": 0.0, "academic_year_totals": {}, "oldest_due_date": "",
                     }
                     if candidate["student_id"] not in existing_ids:
                         rows.append(candidate)
@@ -166,6 +178,7 @@ class DuesWindow(WorkspacePage):
             class_text = f"{row['student_class']}{' / ' + row['student_section'] if row['student_section'] else ''}"
             values = (
                 row["scholar_no"], row["student"], row["father_name"], class_text,
+                format_currency(row["previous_year_due"]), format_currency(row["current_year_due"]),
                 format_currency(row["total_due"]), row["oldest_due_date"], days,
             )
             row_data = dict(row) | {"days_overdue": days}

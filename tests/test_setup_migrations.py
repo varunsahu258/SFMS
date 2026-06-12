@@ -96,3 +96,17 @@ def test_installment_schedule_migration_is_idempotent():
     assert {"academic_year", "class_name", "installment_1_due", "installment_2_due", "installment_3_due"} <= columns
     late_columns = {row[1] for row in conn.execute("PRAGMA table_info(late_fee_assessments)")}
     assert {"academic_year", "installment_no", "register_type"} <= late_columns
+
+
+def test_opening_balance_migration_is_idempotent():
+    from migrations import migration_v016_opening_balances
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE users(id INTEGER PRIMARY KEY)")
+    conn.execute("CREATE TABLE students(id INTEGER PRIMARY KEY)")
+    conn.execute("CREATE TABLE student_charges(id INTEGER PRIMARY KEY)")
+    migration_v016_opening_balances(conn)
+    migration_v016_opening_balances(conn)
+
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(opening_balances)")}
+    assert {"student_id", "academic_year", "amount", "due_date", "charge_id", "created_by"} <= columns

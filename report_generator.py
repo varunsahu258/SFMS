@@ -598,23 +598,25 @@ def classwise_dues_report(
     conn, class_name, academic_year, student_id=None, *, student_ids=None,
     include_fields: tuple[str, ...] = (),
 ) -> str:
-    """Generate combined dues with configurable student details and selection."""
+    """Generate dues grouped by student and academic year across the complete ledger."""
     selected_ids = set(int(value) for value in (student_ids or ([] if student_id is None else [student_id])))
-    if academic_year == active_academic_year(conn):
+    current_year = active_academic_year(conn)
+    if current_year:
         if selected_ids:
             for selected_id in selected_ids:
-                ensure_student_charges(conn, academic_year, selected_id)
+                ensure_student_charges(conn, current_year, selected_id)
         else:
-            ensure_student_charges(conn, academic_year)
+            ensure_student_charges(conn, current_year)
     raw_rows = [
-        row for row in LedgerService(conn).get_all_outstanding(academic_year)
+        row for row in LedgerService(conn).get_all_outstanding()
         if (not class_name or row["student_class"] == class_name)
         and (not selected_ids or int(row["student_id"]) in selected_ids)
     ]
-    groups: dict[int, dict] = {}
+    groups: dict[tuple[int, str], dict] = {}
     for row in raw_rows:
-        group = groups.setdefault(int(row["student_id"]), {
-            "student": row["student"], "class": row["student_class"],
+        year = str(row.get("academic_year") or "Unspecified")
+        group = groups.setdefault((int(row["student_id"]), year), {
+            "student": row["student"], "class": row["student_class"], "academic_year": year,
             "father_name": row.get("father_name") or "", "phone": row.get("phone") or "",
             "mobile2": row.get("mobile2") or "", "address": row.get("address") or "",
             "scholar_no": row.get("scholar_no") or "", "total_due": 0.0, "oldest_due": None,
@@ -623,17 +625,18 @@ def classwise_dues_report(
         due_date = _parse_date(row.get("due_date"))
         if due_date and (group["oldest_due"] is None or due_date < group["oldest_due"]):
             group["oldest_due"] = due_date
-    rows = sorted(groups.values(), key=lambda row: row["student"])
+    rows = sorted(groups.values(), key=lambda row: (row["student"], row["academic_year"]))
     today = date.today()
     optional = {
-        "father_name": ("Father's Name", 35 * mm), "phone": ("Mobile", 25 * mm),
-        "mobile2": ("Alternate Mobile", 28 * mm), "address": ("Address", 48 * mm),
-        "scholar_no": ("Scholar No.", 25 * mm),
+        "father_name": ("Father's Name", 32 * mm), "phone": ("Mobile", 23 * mm),
+        "mobile2": ("Alternate Mobile", 26 * mm), "address": ("Address", 42 * mm),
+        "scholar_no": ("Scholar No.", 23 * mm),
     }
-    fields = [("student", "Student", 42 * mm), ("class", "Class", 22 * mm)]
+    fields = [("student", "Student", 38 * mm), ("class", "Class", 18 * mm),
+              ("academic_year", "Academic Year", 25 * mm)]
     fields.extend((key, *optional[key]) for key in include_fields if key in optional)
-    fields.extend((("total_due", "Total Due", 28 * mm), ("due_on", "Due On", 25 * mm),
-                   ("days", "Days", 18 * mm)))
+    fields.extend((("total_due", "Outstanding", 25 * mm), ("due_on", "Due On", 23 * mm),
+                   ("days", "Days", 15 * mm)))
     data = [[heading for _key, heading, _width in fields]]
     for row in rows:
         due_date = row["oldest_due"]
@@ -645,9 +648,9 @@ def classwise_dues_report(
     if len(data) == 1:
         data.append(["No outstanding dues"] + ["" for _ in fields[1:]])
     selection_suffix = "_selected" if selected_ids else ""
-    path = _output_path(f"class_dues_{_safe_name(class_name or 'all')}_{_safe_name(academic_year)}{selection_suffix}.pdf")
+    path = _output_path(f"class_dues_{_safe_name(class_name or 'all')}_all_years{selection_suffix}.pdf")
     story: list = []
-    title = "Selected Student Dues Statements" if selected_ids else f"Classwise Dues Report — {class_name} ({academic_year})"
+    title = "Selected Student Dues — All Academic Years" if selected_ids else f"Classwise Dues — {class_name} — All Academic Years"
     _header(story, conn, title)
     widths = [width for _key, _heading, width in fields]
     available = A4[0] - 2 * MARGIN

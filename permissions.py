@@ -32,6 +32,7 @@ PERMISSIONS: tuple[PermissionDefinition, ...] = (
     PermissionDefinition("manage_exemptions", "Create exemptions", "Financial Controls"),
     PermissionDefinition("manage_fee_heads", "Manage fee heads", "Financial Controls"),
     PermissionDefinition("manage_fee_structure", "Manage fee structures", "Financial Controls"),
+    PermissionDefinition("manage_opening_balances", "Enter prior-year opening balances", "Financial Controls"),
     PermissionDefinition("apply_late_fees", "Apply late fees to selected students", "Financial Controls"),
     PermissionDefinition("manage_academic_years", "Manage and switch academic years", "Financial Controls"),
     PermissionDefinition("reprint_receipts", "Search and reprint receipts", "Sensitive Financial Actions"),
