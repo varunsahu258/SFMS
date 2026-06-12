@@ -520,6 +520,14 @@ def migration_v016_opening_balances(conn: sqlite3.Connection) -> None:
     )
 
 
+def migration_v017_cashbook_and_student_details(conn: sqlite3.Connection) -> None:
+    """Add cashbook tables and extended student profile details."""
+    from cashbook_service import install_cashbook_schema, ensure_student_extra_columns
+
+    ensure_student_extra_columns(conn)
+    install_cashbook_schema(conn)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     ("v001_base_settings", migration_v001_base_settings),
     ("v002_setup_defaults", migration_v002_setup_defaults),
@@ -537,6 +545,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     ("v014_admissions", migration_v014_admissions),
     ("v015_installment_schedules", migration_v015_installment_schedules),
     ("v016_opening_balances", migration_v016_opening_balances),
+    ("v017_cashbook_and_student_details", migration_v017_cashbook_and_student_details),
 )
 
 

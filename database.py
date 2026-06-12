@@ -114,6 +114,15 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             gender TEXT,
             category TEXT,
             guardian_name TEXT,
+            is_rte INTEGER NOT NULL DEFAULT 0,
+            father_education TEXT,
+            father_occupation TEXT,
+            family_annual_income REAL,
+            mother_education TEXT,
+            mother_occupation TEXT,
+            conveyance_details TEXT,
+            bank_account_number TEXT,
+            ifsc_code TEXT,
             is_active INTEGER DEFAULT 1,
             status TEXT DEFAULT '{STATUS_ACTIVE}',
             created_at TEXT
@@ -452,6 +461,7 @@ def init_db() -> None:
     """Initialize the SQLite database, triggers, seed data, and charge ledger."""
     from ledger import migrate_legacy_ledger
     from payment_controls import migrate_payment_controls
+    from cashbook_service import install_cashbook_schema, ensure_student_extra_columns
     from migrations import run_migrations
 
     with sqlite3.connect(DB_PATH) as conn:
@@ -465,5 +475,7 @@ def init_db() -> None:
         run_migrations(conn, through="v004_receipt_print_tracking")
         migrate_payment_controls(conn)
         migrate_legacy_ledger(conn)
+        ensure_student_extra_columns(conn)
+        install_cashbook_schema(conn)
         ensure_receipt_sequence(conn)
         run_migrations(conn)
