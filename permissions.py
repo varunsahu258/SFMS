@@ -44,6 +44,14 @@ PERMISSIONS: tuple[PermissionDefinition, ...] = (
     PermissionDefinition("manage_timetable", "Manage teachers, subjects, timetable setup", "Timetable"),
     PermissionDefinition("generate_timetable", "Generate and publish timetables", "Timetable"),
     PermissionDefinition("view_timetable", "View and print timetables", "Timetable", True),
+    PermissionDefinition("manage_exams", "Create exams, papers, printing records, storage and seating plans", "Exams", True),
+    PermissionDefinition("manage_results", "Enter marks and grades, print marksheets and PTM result diaries", "Results", True),
+    PermissionDefinition("manage_users", "Create, activate, reset and unlock user accounts", "Administration"),
+    PermissionDefinition("manage_permissions", "Grant or revoke role and module permissions", "Administration"),
+    PermissionDefinition("manage_settings", "Edit school, appearance, security and data settings", "Administration"),
+    PermissionDefinition("manage_backup", "Run backup, restore, archive and Drive upload tools", "Administration"),
+    PermissionDefinition("change_own_password", "Change own login password", "Administration", True),
+    PermissionDefinition("view_help", "Open help and about pages", "Administration", True),
 )
 
 PERMISSION_KEYS = frozenset(item.key for item in PERMISSIONS)
