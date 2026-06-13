@@ -545,6 +545,13 @@ def migration_v018_timetable_class_controls(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE tt_schedule_config ADD COLUMN assembly_duration_min INTEGER NOT NULL DEFAULT 0")
 
 
+def migration_v019_exam_result_management(conn: sqlite3.Connection) -> None:
+    """Add exam planning, paper, seating, marks, and result tables."""
+    from exam_service import install_exam_schema
+
+    install_exam_schema(conn)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     ("v001_base_settings", migration_v001_base_settings),
     ("v002_setup_defaults", migration_v002_setup_defaults),
@@ -564,6 +571,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     ("v016_opening_balances", migration_v016_opening_balances),
     ("v017_cashbook_and_student_details", migration_v017_cashbook_and_student_details),
     ("v018_timetable_class_controls", migration_v018_timetable_class_controls),
+    ("v019_exam_result_management", migration_v019_exam_result_management),
 )
 
 

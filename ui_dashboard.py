@@ -250,11 +250,13 @@ class DashboardWindow(tk.Toplevel):
             "exams": {
                 "title": "Exam Management", "icon": "✎", "color": "#8a4f9e",
                 "description": "Plan examinations, papers, seating and secure paper printing.",
+                "items": (("exams", "manage_exams", "Open Exam Management", "Create exams, papers, paper storage and seating plans.", self._on_exams_click),),
                 "planned": ("Exam Timetable", "Paper Management", "Exam Seating Plan", "Paper Printing"),
             },
             "results": {
                 "title": "Result Management", "icon": "✓", "color": "#b08320",
                 "description": "Prepare marksheets and result diaries for parent meetings.",
+                "items": (("results", "manage_results", "Open Result Management", "Enter marks/grades, print marksheets and PTM diaries.", self._on_results_click),),
                 "planned": ("Marksheet Generation", "Result Diary for PTMs"),
             },
         }
@@ -895,6 +897,23 @@ class DashboardWindow(tk.Toplevel):
         from ui_timetable import TimetableWindow
 
         self._show_workspace_page(TimetableWindow, "Timetable", "timetable")
+
+
+    @auth.require_permission("manage_exams")
+    def _on_exams_click(self) -> None:
+        """Open complete exam planning, paper, and seating management."""
+        auth.touch_session()
+        from ui_exam import ExamWindow
+
+        self._show_workspace_page(ExamWindow, "Exam Management", "exams")
+
+    @auth.require_permission("manage_results")
+    def _on_results_click(self) -> None:
+        """Open marks entry, marksheet printing, and PTM result diaries."""
+        auth.touch_session()
+        from ui_result import ResultWindow
+
+        self._show_workspace_page(ResultWindow, "Result Management", "results")
 
     @auth.require_permission("reprint_receipts")
     def _on_receipt_reprint_click(self) -> None:
