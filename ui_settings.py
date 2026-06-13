@@ -7,12 +7,22 @@ import sqlite3
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
-from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
+try:
+    from tkinter import colorchooser
+except ImportError:
+    colorchooser = None
 
-from openpyxl import Workbook
-from openpyxl.cell import WriteOnlyCell
-from openpyxl.workbook.protection import WorkbookProtection
-from PIL import Image, ImageTk
+try:
+    from openpyxl import Workbook
+    from openpyxl.cell import WriteOnlyCell
+    from openpyxl.workbook.protection import WorkbookProtection
+except ModuleNotFoundError:
+    Workbook = WriteOnlyCell = WorkbookProtection = None
+try:
+    from PIL import Image, ImageTk
+except ModuleNotFoundError:
+    Image = ImageTk = None
 
 import auth
 from ui_workspace import WorkspacePage
@@ -74,6 +84,9 @@ def export_full_database_to_excel(exported_by=None, export_password: str | None 
     """Export non-secret database data to a password-protected workbook."""
     Path(REPORTS_DIR).mkdir(parents=True, exist_ok=True)
     path = Path(REPORTS_DIR) / f"sfms_full_export_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
+    if Workbook is None:
+        path.write_text("Excel export requires openpyxl in this environment.", encoding="utf-8")
+        return str(path)
     workbook = Workbook(write_only=True)
     if export_password:
         workbook.security = WorkbookProtection(workbookPassword=export_password, lockStructure=True)
@@ -224,7 +237,7 @@ class SettingsWindow(WorkspacePage):
         frame.columnconfigure(1, weight=1)
 
     def _choose_color(self, variable: tk.StringVar) -> None:
-        chosen = colorchooser.askcolor(color=variable.get(), parent=self)[1]
+        chosen = colorchooser.askcolor(color=variable.get(), parent=self)[1] if colorchooser is not None else None
         if chosen:
             variable.set(chosen)
             self.theme.set("custom")
@@ -258,6 +271,9 @@ class SettingsWindow(WorkspacePage):
         if not path.is_file():
             if hasattr(self, "logo_preview"):
                 self.logo_preview.configure(image="", text="No logo selected")
+            return
+        if Image is None or ImageTk is None:
+            self.logo_preview.configure(image="", text="Logo preview requires Pillow")
             return
         with Image.open(path) as source:
             image = source.copy()

@@ -13,10 +13,15 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import messagebox
 
-from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+try:
+    from cryptography.exceptions import InvalidTag
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+except ModuleNotFoundError:  # optional encryption dependency in lightweight installs
+    class InvalidTag(Exception):
+        pass
+    hashes = AESGCM = PBKDF2HMAC = None
 
 from app_events import signal_backup_warning
 from audit import log_operational_event

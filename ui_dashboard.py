@@ -250,13 +250,21 @@ class DashboardWindow(tk.Toplevel):
             "exams": {
                 "title": "Exam Management", "icon": "✎", "color": "#8a4f9e",
                 "description": "Plan examinations, papers, seating and secure paper printing.",
-                "items": (("exams", "manage_exams", "Open Exam Management", "Create exams, papers, paper storage and seating plans.", self._on_exams_click),),
+                "items": (
+                    ("exams", "manage_exams", "Create All Exams", "Create monthly, half-yearly, project, annual and personality exams.", self._on_exams_click),
+                    ("exam_papers", "manage_exams", "Paper Printing & Storage", "Attach papers, mark printing status and storage location.", lambda: self._on_exams_click("papers")),
+                    ("exam_seating", "manage_exams", "Exam Seating Plan", "Configure room rows/columns and assign students by bench rules.", lambda: self._on_exams_click("seating")),
+                ),
                 "planned": ("Exam Timetable", "Paper Management", "Exam Seating Plan", "Paper Printing"),
             },
             "results": {
                 "title": "Result Management", "icon": "✓", "color": "#b08320",
                 "description": "Prepare marksheets and result diaries for parent meetings.",
-                "items": (("results", "manage_results", "Open Result Management", "Enter marks/grades, print marksheets and PTM diaries.", self._on_results_click),),
+                "items": (
+                    ("results", "manage_results", "Marks & Grades Entry", "Enter monthly, half-yearly, project, annual and personality grades.", self._on_results_click),
+                    ("marksheets", "manage_results", "Marksheet Generation", "Print report-card marksheets using the school template.", lambda: self._on_results_click("marksheet")),
+                    ("ptm_diary", "manage_results", "Result Diary for PTMs", "Generate class-wise PTM result diary PDFs.", lambda: self._on_results_click("marksheet")),
+                ),
                 "planned": ("Marksheet Generation", "Result Diary for PTMs"),
             },
         }
@@ -909,20 +917,20 @@ class DashboardWindow(tk.Toplevel):
 
 
     @auth.require_permission("manage_exams")
-    def _on_exams_click(self) -> None:
+    def _on_exams_click(self, initial_tab: str = "exams") -> None:
         """Open complete exam planning, paper, and seating management."""
         auth.touch_session()
         from ui_exam import ExamWindow
 
-        self._show_workspace_page(ExamWindow, "Exam Management", "exams")
+        self._show_workspace_page(lambda master, embedded=False: ExamWindow(master, embedded=embedded, initial_tab=initial_tab), "Exam Management", "exams")
 
     @auth.require_permission("manage_results")
-    def _on_results_click(self) -> None:
+    def _on_results_click(self, initial_tab: str = "marks") -> None:
         """Open marks entry, marksheet printing, and PTM result diaries."""
         auth.touch_session()
         from ui_result import ResultWindow
 
-        self._show_workspace_page(ResultWindow, "Result Management", "results")
+        self._show_workspace_page(lambda master, embedded=False: ResultWindow(master, embedded=embedded, initial_tab=initial_tab), "Result Management", "results")
 
     @auth.require_permission("reprint_receipts")
     def _on_receipt_reprint_click(self) -> None:

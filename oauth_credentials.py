@@ -5,7 +5,10 @@ from __future__ import annotations
 import importlib
 from pathlib import Path
 
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+try:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+except ModuleNotFoundError:
+    AESGCM = None
 
 from config import BASE_DIR
 from receipt_integrity import integrity_key
@@ -28,13 +31,15 @@ def _fallback_key() -> bytes:
 def _store_fallback(token_json: str) -> None:
     import os
 
+    if AESGCM is None:
+        return
     nonce = os.urandom(_NONCE_SIZE)
     encrypted = AESGCM(_fallback_key()).encrypt(nonce, token_json.encode("utf-8"), _MAGIC)
     _FALLBACK_PATH.write_bytes(_MAGIC + nonce + encrypted)
 
 
 def _load_fallback() -> str | None:
-    if not _FALLBACK_PATH.is_file():
+    if AESGCM is None or not _FALLBACK_PATH.is_file():
         return None
     payload = _FALLBACK_PATH.read_bytes()
     if not payload.startswith(_MAGIC):

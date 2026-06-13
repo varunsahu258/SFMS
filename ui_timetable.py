@@ -410,7 +410,27 @@ class TimetableWindow(WorkspacePage):
             with _connect() as conn: problem = build_problem(conn)
         except Exception as exc: messagebox.showerror("Timetable", str(exc), parent=self); return
         self.generate_button.configure(state="disabled"); self.generation_status.set("Generating timetable…")
-        threading.Thread(target=lambda: self._solve_queue.put(solve(problem)), daemon=True).start(); self.after(200, self.poll_generation)
+        threading.Thread(target=lambda: self._solve_queue.put(self._solve_with_fallbacks(problem)), daemon=True).start(); self.after(200, self.poll_generation)
+
+    def _solve_with_fallbacks(self, problem):
+        """Try strict generation, then safe relaxations so normal schools get a usable timetable."""
+        attempts = [
+            ({}, "strict constraints"),
+            ({"strict_class_teacher_period_one": False}, "relaxed class-teacher period 1"),
+            ({"strict_class_teacher_period_one": False, "relax_teacher_free_periods": True}, "relaxed class-teacher period 1 and minimum free periods"),
+        ]
+        first_failure = None
+        for overrides, label in attempts:
+            candidate = dict(problem)
+            candidate.update(overrides)
+            result = solve(candidate)
+            if result.success:
+                if label != "strict constraints":
+                    result.violations.insert(0, f"Generated using {label}; review the Conflicts tab before publishing.")
+                return result
+            if first_failure is None:
+                first_failure = result
+        return first_failure
 
     def poll_generation(self):
         try: result = self._solve_queue.get_nowait()

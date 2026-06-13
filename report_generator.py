@@ -9,15 +9,23 @@ from pathlib import Path
 from typing import Iterable
 from xml.sax.saxutils import escape
 
-from reportlab.graphics.charts.barcharts import VerticalBarChart
-from reportlab.graphics.shapes import Drawing, String
-from reportlab.lib import colors
-from reportlab.lib.enums import TA_CENTER, TA_RIGHT
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.lib.units import mm
-from reportlab.platypus import Image, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
-from reportlab.pdfgen import canvas
+try:
+    from reportlab.graphics.charts.barcharts import VerticalBarChart
+    from reportlab.graphics.shapes import Drawing, String
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER, TA_RIGHT
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import mm
+    from reportlab.platypus import Image, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    from reportlab.pdfgen import canvas
+except ModuleNotFoundError:  # optional report export dependency in lightweight installs
+    VerticalBarChart = Drawing = String = colors = ParagraphStyle = getSampleStyleSheet = None
+    Image = PageBreak = Paragraph = SimpleDocTemplate = Spacer = Table = TableStyle = canvas = None
+    TA_CENTER = 1
+    TA_RIGHT = 2
+    A4 = (595, 842)
+    mm = 2.83465
 
 from config import REPORTS_DIR, SCHOOL_NAME
 from excel_exporter import export_to_excel

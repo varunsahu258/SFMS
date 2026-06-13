@@ -10,7 +10,11 @@ from exam_service import (
     create_exam,
     generate_seating_plan,
     install_exam_schema,
+    marksheet_pdf,
+    result_diary_pdf,
     save_marks,
+    save_personality_grade,
+    update_paper,
     upsert_room,
 )
 from migrations import migration_v019_exam_result_management
@@ -71,3 +75,21 @@ def test_exam_subject_room_seating_and_marks_workflow():
     save_marks(conn, subject_id, 1, monthly=7, half_yearly=9, project=10, annual=51)
     row = conn.execute("SELECT * FROM exam_marks WHERE exam_subject_id=? AND student_id=1", (subject_id,)).fetchone()
     assert row["grade"] == calculate_grade(77)
+
+
+def test_paper_storage_personality_and_pdf_fallbacks(tmp_path, monkeypatch):
+    import exam_service
+
+    monkeypatch.setattr(exam_service, "REPORTS_DIR", tmp_path)
+    conn = exam_conn()
+    exam_id = create_exam(conn, "Annual Exams", "ANNUAL", "2025-26")
+    subject_id = add_exam_subject(conn, exam_id, "7th", "English", 100)
+    update_paper(conn, subject_id, "STORED", "/papers/english.pdf", "Steel Almirah A")
+    save_marks(conn, subject_id, 1, monthly=7, half_yearly=9, project=10, annual=51)
+    save_personality_grade(conn, exam_id, 1, "Personal Quality", "Hard Work", "A", "A")
+
+    paper = conn.execute("SELECT * FROM exam_subjects WHERE id=?", (subject_id,)).fetchone()
+    assert paper["paper_status"] == "STORED"
+    assert paper["stored_location"] == "Steel Almirah A"
+    assert marksheet_pdf(conn, exam_id, 1).endswith(".pdf")
+    assert result_diary_pdf(conn, exam_id, "7th").endswith(".pdf")

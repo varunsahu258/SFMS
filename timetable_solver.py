@@ -27,6 +27,8 @@ def solve(problem: dict, max_backtracks: int = MAX_BACKTRACKS) -> SolverResult:
     availability = problem.get("availability", {})
     constraints = problem.get("constraints", {})
     class_teachers = {name: int(value) for name, value in problem.get("class_teachers", {}).items() if value}
+    strict_class_teacher_period_one = bool(problem.get("strict_class_teacher_period_one", True))
+    relax_teacher_free_periods = bool(problem.get("relax_teacher_free_periods", False))
     requirements = [dict(item) for item in problem.get("requirements", ()) if int(item.get("periods_per_week", 0)) > 0]
     row_slots = [(class_name, day, period) for class_name in classes for day in days for period in periods]
     occupied: dict[tuple[str, str, int], tuple[int, int]] = {}
@@ -44,16 +46,17 @@ def solve(problem: dict, max_backtracks: int = MAX_BACKTRACKS) -> SolverResult:
         if needed > capacity:
             return SolverResult(False, [], [f"{class_name} requires {needed} periods but only {capacity} slots exist."], {"backtracks": 0, "duration_ms": int((perf_counter() - started) * 1000)})
     pinned: dict[tuple[str, str, int], int] = {}
-    for class_name, class_teacher_id in class_teachers.items():
-        eligible = [
-            subject_id for (assigned_class, subject_id), teacher_ids in assignments.items()
-            if assigned_class == class_name and class_teacher_id in teacher_ids and remaining.get((class_name, subject_id), 0) > 0
-        ]
-        if not eligible:
-            teacher_name = teachers.get(class_teacher_id, {}).get("name", class_teacher_id)
-            return SolverResult(False, [], [f"Class teacher {teacher_name} has no eligible subject assignment with weekly requirement for {class_name} period 1."], {"backtracks": 0, "duration_ms": int((perf_counter() - started) * 1000)})
-        for day in days:
-            pinned[(class_name, day, 1)] = class_teacher_id
+    if strict_class_teacher_period_one:
+        for class_name, class_teacher_id in class_teachers.items():
+            eligible = [
+                subject_id for (assigned_class, subject_id), teacher_ids in assignments.items()
+                if assigned_class == class_name and class_teacher_id in teacher_ids and remaining.get((class_name, subject_id), 0) > 0
+            ]
+            if not eligible:
+                teacher_name = teachers.get(class_teacher_id, {}).get("name", class_teacher_id)
+                return SolverResult(False, [], [f"Class teacher {teacher_name} has no eligible subject assignment with weekly requirement for {class_name} period 1."], {"backtracks": 0, "duration_ms": int((perf_counter() - started) * 1000)})
+            for day in days:
+                pinned[(class_name, day, 1)] = class_teacher_id
     for key in remaining:
         if not assignments.get(key):
             return SolverResult(False, [], [f"No eligible teacher is assigned for {key[0]} / subject {key[1]}."], {"backtracks": 0, "duration_ms": int((perf_counter() - started) * 1000)})
@@ -61,7 +64,7 @@ def solve(problem: dict, max_backtracks: int = MAX_BACKTRACKS) -> SolverResult:
     def daily_limit(teacher_id: int) -> int:
         teacher = teachers[teacher_id]
         configured = int(teacher.get("max_periods_day", 6))
-        free_required = int(teacher.get("min_free_periods_day", 1) or 0)
+        free_required = 0 if relax_teacher_free_periods else int(teacher.get("min_free_periods_day", 1) or 0)
         return max(0, min(configured, len(periods) - free_required))
 
     def hard_legal(class_name: str, subject_id: int, teacher_id: int, day: str, period: int) -> bool:
@@ -70,7 +73,7 @@ def solve(problem: dict, max_backtracks: int = MAX_BACKTRACKS) -> SolverResult:
         pinned_teacher = pinned.get((class_name, day, period))
         if pinned_teacher is not None and teacher_id != pinned_teacher:
             return False
-        if period == 1 and class_teachers.get(class_name) and class_teachers[class_name] != teacher_id:
+        if strict_class_teacher_period_one and period == 1 and class_teachers.get(class_name) and class_teachers[class_name] != teacher_id:
             return False
         if period not in availability.get(teacher_id, {}).get(day, []):
             return False
@@ -182,6 +185,10 @@ def solve(problem: dict, max_backtracks: int = MAX_BACKTRACKS) -> SolverResult:
             "is_free": 0 if subject_teacher else 1, "is_locked": 0,
         })
     violations = _soft_violations(slots, problem) if success else [failure]
+    if success and not strict_class_teacher_period_one and class_teachers:
+        violations.insert(0, "Class-teacher period-1 rule was relaxed to produce a complete timetable. Review period 1 manually if required.")
+    if success and relax_teacher_free_periods:
+        violations.insert(0, "Teacher minimum-free-period rule was relaxed to produce a complete timetable. Review teacher workload before publishing.")
     return SolverResult(success, slots, violations, {"backtracks": backtracks, "duration_ms": int((perf_counter() - started) * 1000)})
 
 
