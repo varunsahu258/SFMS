@@ -217,8 +217,12 @@ class DashboardWindow(tk.Toplevel):
             },
             "cashbook": {
                 "title": "Cashbook Management", "icon": "▤", "color": "#247a63",
-                "description": "Income, expenses, vouchers, bank reconciliation and cash closing.",
-                "planned": ("Daily Cashbook", "Income & Expenses", "Payment Vouchers", "Bank Reconciliation", "Cash Closing"),
+                "description": "Income, expenses, vouchers, bank statements, account balances and cash closing.",
+                "items": (
+                    ("cashbook", "view_cashbook", "View Cashbook", "Search transactions, balances, custom-period summaries and print reports.", self._on_cashbook_click),
+                    ("cashbook_add", "manage_cashbook", "Income / Expense Adder", "Add income, expenses, payment vouchers, heads and accounts.", self._on_cashbook_click),
+                    ("bank_statement", "manage_cashbook", "Bank Statements Upload & Analyse", "Upload Central Bank of India CSV statements and match entries.", self._on_cashbook_click),
+                ),
             },
             "timetable": {
                 "title": "Timetable Management", "icon": "▦", "color": "#3467b2",
@@ -869,6 +873,14 @@ class DashboardWindow(tk.Toplevel):
         from ui_reports import ReportsWindow
 
         self._show_workspace_page(ReportsWindow, "Reports", "reports")
+
+    @auth.require_permission("view_cashbook")
+    def _on_cashbook_click(self) -> None:
+        """Open cashbook management, reports, vouchers, and bank analysis."""
+        auth.touch_session()
+        from ui_cashbook import CashbookWindow
+
+        self._show_workspace_page(CashbookWindow, "Cashbook", "cashbook")
 
     @auth.require_permission("view_timetable")
     def _on_timetable_click(self) -> None:

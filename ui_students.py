@@ -126,6 +126,9 @@ class StudentWindow(WorkspacePage):
         self.geometry("1240x620")
         self.configure(bg=SPLASH_BG)
         self.search_var = tk.StringVar()
+        self.filter_class_var = tk.StringVar(value="All Classes")
+        self.filter_gender_var = tk.StringVar(value="All Genders")
+        self.filter_rte_var = tk.StringVar(value="All RTE")
         self._ensure_import_columns()
         self._build_widgets()
         self.refresh()
@@ -140,7 +143,11 @@ class StudentWindow(WorkspacePage):
                 "address": "TEXT", "dob": "TEXT", "admission_date": "TEXT",
                 "mobile2": "TEXT", "sssm_id": "TEXT", "gender": "TEXT",
                 "category": "TEXT", "route": "TEXT", "vehicle_fee": "REAL DEFAULT 0",
-                "has_vehicle_fee": "INTEGER DEFAULT 0",
+                "has_vehicle_fee": "INTEGER DEFAULT 0", "is_rte": "INTEGER NOT NULL DEFAULT 0",
+                "father_education": "TEXT", "father_occupation": "TEXT",
+                "family_annual_income": "REAL", "mother_education": "TEXT",
+                "mother_occupation": "TEXT", "conveyance_details": "TEXT",
+                "bank_account_number": "TEXT", "ifsc_code": "TEXT",
             }.items():
                 if column not in existing:
                     conn.execute(f"ALTER TABLE students ADD COLUMN {column} {ddl}")
@@ -150,10 +157,22 @@ class StudentWindow(WorkspacePage):
         top = tk.Frame(self, bg=SPLASH_BG)
         top.pack(fill="x", padx=12, pady=10)
         tk.Label(top, text="Search", bg=SPLASH_BG, fg=SPLASH_FG).pack(side="left")
-        entry = ttk.Entry(top, textvariable=self.search_var, width=42)
+        entry = ttk.Entry(top, textvariable=self.search_var, width=28)
         entry.pack(side="left", padx=8)
         entry.bind("<KeyRelease>", lambda _event: self.refresh())
-        ttk.Button(top, text="Clear", command=self._clear_search).pack(side="left")
+        tk.Label(top, text="Class", bg=SPLASH_BG, fg=SPLASH_FG).pack(side="left", padx=(8, 2))
+        self.class_filter = ttk.Combobox(top, textvariable=self.filter_class_var, state="readonly", width=14)
+        self.class_filter.pack(side="left")
+        self.class_filter.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
+        tk.Label(top, text="Gender", bg=SPLASH_BG, fg=SPLASH_FG).pack(side="left", padx=(8, 2))
+        gender_filter = ttk.Combobox(top, textvariable=self.filter_gender_var, values=("All Genders", "Male", "Female", "Other"), state="readonly", width=12)
+        gender_filter.pack(side="left")
+        gender_filter.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
+        tk.Label(top, text="RTE", bg=SPLASH_BG, fg=SPLASH_FG).pack(side="left", padx=(8, 2))
+        rte_filter = ttk.Combobox(top, textvariable=self.filter_rte_var, values=("All RTE", "RTE", "Non-RTE"), state="readonly", width=10)
+        rte_filter.pack(side="left")
+        rte_filter.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
+        ttk.Button(top, text="Clear", command=self._clear_search).pack(side="left", padx=6)
 
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill="both", expand=True, padx=12, pady=(0, 8))
@@ -214,6 +233,9 @@ class StudentWindow(WorkspacePage):
         """Clear the shared active/archive search and reload both tabs."""
         auth.touch_session()
         self.search_var.set("")
+        self.filter_class_var.set("All Classes")
+        self.filter_gender_var.set("All Genders")
+        self.filter_rte_var.set("All RTE")
         self.refresh()
 
     def refresh(self) -> None:
@@ -223,19 +245,42 @@ class StudentWindow(WorkspacePage):
             for item in tree.get_children():
                 tree.delete(item)
         term = f"%{self.search_var.get().strip()}%"
+        filters = ["(name LIKE ? OR class LIKE ? OR aadhaar LIKE ? OR address LIKE ? OR father_name LIKE ? OR mother_name LIKE ?)"]
+        params: list[object] = [term, term, term, term, term, term]
+        if self.filter_class_var.get() != "All Classes":
+            filters.append("class=?")
+            params.append(self.filter_class_var.get())
+        if self.filter_gender_var.get() != "All Genders":
+            filters.append("gender=?")
+            params.append(self.filter_gender_var.get())
+        if self.filter_rte_var.get() != "All RTE":
+            filters.append("COALESCE(is_rte,0)=?")
+            params.append(1 if self.filter_rte_var.get() == "RTE" else 0)
+        filter_sql = " AND ".join(filters)
+        archived_filter_sql = filter_sql
+        for source, target in (
+            ("class", "s.class"), ("aadhaar", "s.aadhaar"), ("address", "s.address"),
+            ("father_name", "s.father_name"), ("mother_name", "s.mother_name"),
+            ("gender", "s.gender"), ("is_rte", "s.is_rte"),
+        ):
+            archived_filter_sql = archived_filter_sql.replace(source, target)
+        archived_filter_sql = archived_filter_sql.replace("(name LIKE", "(s.name LIKE")
         with connect_db() as conn:
+            classes = ["All Classes", *[row[0] for row in conn.execute("SELECT name FROM classes WHERE is_active=1 ORDER BY name")]]
+            if hasattr(self, "class_filter"):
+                self.class_filter.configure(values=classes)
             active_rows = conn.execute(
-                """
+                f"""
                 SELECT id, scholar_no, name, class, section, phone, ekyc_status,
                        CASE WHEN is_active = 1 THEN status ELSE 'INACTIVE' END AS status
                 FROM students
-                WHERE status <> 'LEFT' AND (name LIKE ? OR class LIKE ? OR aadhaar LIKE ?)
+                WHERE status <> 'LEFT' AND {filter_sql}
                 ORDER BY class, name
                 """,
-                (term, term, term),
+                params,
             ).fetchall()
             archived_rows = conn.execute(
-                """
+                f"""
                 SELECT s.id, s.name, s.class,
                        COALESCE((
                            SELECT a.timestamp FROM audit_log a
@@ -249,10 +294,10 @@ class StudentWindow(WorkspacePage):
                        ) THEN 'Yes' ELSE 'No' END AS tc_issued,
                        COALESCE((SELECT SUM(CASE WHEN p.note LIKE 'VOID of %' THEN p.amount_paid WHEN UPPER(p.payment_mode)<>'CHEQUE' OR p.cheque_status='CLEARED' THEN p.amount_paid ELSE 0 END) FROM payments p WHERE p.student_id=s.id),0) AS total_paid
                 FROM students s
-                WHERE s.status = 'LEFT' AND (s.name LIKE ? OR s.class LIKE ? OR s.aadhaar LIKE ?)
+                WHERE s.status = 'LEFT' AND {archived_filter_sql}
                 ORDER BY s.class, s.name
                 """,
-                (term, term, term),
+                params,
             ).fetchall()
         for row in active_rows:
             self.tree.insert("", "end", iid=str(row["id"]), values=(
@@ -478,7 +523,12 @@ class StudentDialog(tk.Toplevel):
         ("Section", "section"), ("Mobile No. 1", "phone"),
         ("Mobile No. 2", "mobile2"), ("SSSM ID", "sssm_id"),
         ("Gender", "gender"), ("Aadhaar Card No.", "aadhaar"),
-        ("Category", "category"),
+        ("Category", "category"), ("RTE Student", "is_rte"),
+        ("Father's Education", "father_education"), ("Father's Occupation", "father_occupation"),
+        ("Family Annual Income", "family_annual_income"),
+        ("Mother's Education", "mother_education"), ("Mother's Occupation", "mother_occupation"),
+        ("Conveyance Details", "conveyance_details"),
+        ("Bank Account Number", "bank_account_number"), ("IFSC Code", "ifsc_code"),
     )
 
     def __init__(self, master, title: str, on_saved=None):
@@ -486,7 +536,7 @@ class StudentDialog(tk.Toplevel):
         apply_theme(self)
         self.on_saved = on_saved
         self.title(title)
-        self.geometry("760x690")
+        self.geometry("840x760")
         self.configure(bg=SPLASH_BG)
         self.vars = {key: tk.StringVar() for _label, key in self.FIELD_ROWS}
         self.vars["ekyc_status"].set("PENDING")
@@ -538,6 +588,10 @@ class StudentDialog(tk.Toplevel):
                 widget = ttk.Combobox(frame, textvariable=self.vars[key], values=("Male", "Female", "Other"), state="readonly", width=24)
             elif key == "category":
                 widget = ttk.Combobox(frame, textvariable=self.vars[key], values=("OBC", "SC", "ST", "General"), state="readonly", width=24)
+            elif key == "is_rte":
+                widget = ttk.Combobox(frame, textvariable=self.vars[key], values=("No", "Yes"), state="readonly", width=24)
+                if not self.vars[key].get():
+                    self.vars[key].set("No")
             elif key in {"dob", "admission_date"}:
                 widget = DateEntry(frame, textvariable=self.vars[key], width=21)
             else:
@@ -579,13 +633,29 @@ class StudentDialog(tk.Toplevel):
                 messagebox.showerror("Validation", f"{label} already exists.", parent=self)
                 return False
         self.vars["aadhaar"].set(aadhaar)
+        income = self.vars.get("family_annual_income")
+        if income is not None and income.get().strip():
+            try:
+                if float(income.get().strip()) < 0:
+                    raise ValueError
+            except ValueError:
+                messagebox.showerror("Validation", "Family annual income must be a positive number when provided.", parent=self)
+                return False
+        ifsc = self.vars.get("ifsc_code")
+        if ifsc is not None:
+            ifsc.set(ifsc.get().strip().upper())
+            if ifsc.get() and not re.match(r"^[A-Z]{4}0[A-Z0-9]{6}$", ifsc.get()):
+                messagebox.showerror("Validation", "IFSC code is invalid.", parent=self)
+                return False
         return True
 
     def values(self) -> dict[str, str | None]:
         values = {key: var.get().strip() for key, var in self.vars.items()}
+        values["is_rte"] = 1 if str(values.get("is_rte", "")).strip().lower() in {"1", "yes", "true", "rte"} else 0
         values["aadhaar"] = values["aadhaar"] or None
         values["phone"] = values["phone"] or None
         values["mobile2"] = values["mobile2"] or None
+        values["family_annual_income"] = values["family_annual_income"] or None
         return values
 
     def save(self) -> None:
@@ -627,7 +697,10 @@ class EditStudentDialog(StudentDialog):
             row = conn.execute("SELECT * FROM students WHERE id=?", (self.student_id,)).fetchone()
         if row:
             for key in self.vars:
-                self.vars[key].set(row[key] or "")
+                if key == "is_rte":
+                    self.vars[key].set("Yes" if row[key] else "No")
+                else:
+                    self.vars[key].set(row[key] or "")
             self.section_combo.configure(values=self._sections(row["class"] or ""))
 
     @auth.require_permission("manage_students")
