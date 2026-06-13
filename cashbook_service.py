@@ -364,17 +364,28 @@ def vehicle_expenses_by_head(conn: sqlite3.Connection, start_date: object | None
     ).fetchall()
 
 
+def _collection_type_clause(include_main: bool, include_small: bool, include_exemption: bool) -> str:
+    """Return a permissive receipt-type filter for current and legacy labels."""
+    receipt_type = "UPPER(COALESCE(r.receipt_type,''))"
+    clauses: list[str] = []
+    if include_main:
+        clauses.append(
+            f"({receipt_type} LIKE '%MAIN%' OR {receipt_type} LIKE '%BIG%' OR "
+            f"({receipt_type} NOT LIKE '%SMALL%' AND {receipt_type} NOT LIKE '%EXEMPT%' "
+            f"AND {receipt_type} NOT LIKE '%VOID%' AND {receipt_type} NOT LIKE '%ADVANCE%'))"
+        )
+    if include_small:
+        clauses.append(f"({receipt_type} LIKE '%SMALL%')")
+    if include_exemption:
+        clauses.append(f"({receipt_type} LIKE '%EXEMPTION%' OR {receipt_type} LIKE '%EXEMPT%')")
+    if not clauses:
+        return "0"
+    return f"({' OR '.join(clauses)}) AND {receipt_type} NOT LIKE '%VOID%' AND {receipt_type} NOT LIKE '%ADVANCE%'"
+
+
 def collection_candidates(conn: sqlite3.Connection, include_main=True, include_small=True, include_exemption=True) -> list[sqlite3.Row]:
     """Return receipts not yet imported into the cashbook."""
-    clauses = []
-    if include_main:
-        clauses.append("UPPER(COALESCE(r.receipt_type,'')) LIKE '%MAIN%'")
-    if include_small:
-        clauses.append("UPPER(COALESCE(r.receipt_type,'')) LIKE '%SMALL%'")
-    if include_exemption:
-        clauses.append("UPPER(COALESCE(r.receipt_type,'')) LIKE '%EXEMPTION%'")
-    if not clauses:
-        return []
+    type_clause = _collection_type_clause(include_main, include_small, include_exemption)
     return conn.execute(
         f"""
         SELECT r.id AS receipt_id,r.receipt_no,r.total_paid,r.receipt_type,r.printed_at,
@@ -384,7 +395,7 @@ def collection_candidates(conn: sqlite3.Connection, include_main=True, include_s
         FROM receipts r
         JOIN payments p ON p.receipt_no=r.receipt_no
         LEFT JOIN students s ON s.id=r.student_id
-        WHERE ({' OR '.join(clauses)})
+        WHERE {type_clause}
           AND NOT EXISTS (SELECT 1 FROM cashbook_transactions t WHERE t.source_type='COLLECTION_RECEIPT' AND t.source_id=r.id)
           AND COALESCE(r.total_paid,0) > 0
         GROUP BY r.id
@@ -541,6 +552,34 @@ def latest_bank_rows(conn: sqlite3.Connection, limit: int = 300) -> list[sqlite3
     ).fetchall()
 
 
+def cashbook_audit_rows(conn: sqlite3.Connection, start_date: object | None = None, end_date: object | None = None,
+                        source_type: str = "") -> list[sqlite3.Row]:
+    """Return cashbook transaction provenance rows for audit review."""
+    where: list[str] = []
+    params: list[object] = []
+    if start_date:
+        where.append(f"{_date_sql('t.txn_date')} >= date(?)")
+        params.append(datetime.strptime(parse_date(start_date), "%d-%m-%Y").strftime("%Y-%m-%d"))
+    if end_date:
+        where.append(f"{_date_sql('t.txn_date')} <= date(?)")
+        params.append(datetime.strptime(parse_date(end_date), "%d-%m-%Y").strftime("%Y-%m-%d"))
+    if source_type:
+        where.append("t.source_type=?")
+        params.append(source_type)
+    sql = """
+        SELECT t.id,t.txn_date,t.txn_type,t.amount,t.payment_method,t.account_name,t.reference,
+               t.source_type,t.source_id,t.receipt_no,t.voucher_no,t.created_at,
+               h.name AS head_name,u.username AS created_by_name
+        FROM cashbook_transactions t
+        JOIN cashbook_heads h ON h.id=t.head_id
+        LEFT JOIN users u ON u.id=t.created_by
+    """
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += f" ORDER BY {_date_sql('t.txn_date')} DESC,t.id DESC"
+    return conn.execute(sql, params).fetchall()
+
+
 def print_cashbook_report(conn: sqlite3.Connection, start_date: object, end_date: object, path: str | None = None) -> str:
     """Generate a PDF cashbook report for a custom period."""
     from reportlab.lib import colors
@@ -606,4 +645,39 @@ def print_voucher(conn: sqlite3.Connection, transaction_id: int, path: str | Non
         ["Amount", f"{float(row['amount'] or 0):.2f}"],
     ], colWidths=[110, 260]))
     SimpleDocTemplate(str(output), pagesize=A5).build(story)
+    return str(output)
+
+
+def print_cashbook_audit_report(conn: sqlite3.Connection, start_date: object, end_date: object,
+                                path: str | None = None) -> str:
+    """Generate a printable audit report for cashbook transaction provenance."""
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.units import mm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.lib.styles import getSampleStyleSheet
+
+    start = parse_date(start_date)
+    end = parse_date(end_date)
+    output = Path(path) if path else Path(REPORTS_DIR) / f"cashbook_audit_{start.replace('-', '')}_{end.replace('-', '')}.pdf"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    rows = [["ID", "Date", "Type", "Head", "Amount", "Source", "Ref/Receipt", "Voucher", "Created", "User"]]
+    for row in cashbook_audit_rows(conn, start, end):
+        rows.append([
+            row["id"], row["txn_date"], row["txn_type"], row["head_name"],
+            f"{float(row['amount'] or 0):.2f}", row["source_type"],
+            row["receipt_no"] or row["reference"] or "", row["voucher_no"] or "",
+            row["created_at"], row["created_by_name"] or "",
+        ])
+    styles = getSampleStyleSheet()
+    story = [Paragraph("Cashbook Audit Report", styles["Title"]), Paragraph(f"Period: {start} to {end}", styles["Normal"]), Spacer(1, 6 * mm)]
+    table = Table(rows, repeatRows=1, colWidths=[12 * mm, 20 * mm, 18 * mm, 32 * mm, 20 * mm, 30 * mm, 32 * mm, 28 * mm, 33 * mm, 24 * mm])
+    table.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.35, colors.black),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 7),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+    ]))
+    story.append(table)
+    SimpleDocTemplate(str(output), pagesize=landscape(A4)).build(story)
     return str(output)

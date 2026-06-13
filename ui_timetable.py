@@ -18,7 +18,7 @@ from timetable_db import (
     list_timetable, list_versions, period_times, publish_version, save_assignment,
     save_requirement, save_schedule_config, save_subject, save_teacher,
     save_teacher_availability, save_teacher_constraints, save_timetable_cell,
-    save_timetable_slots, set_cell_lock,
+    save_timetable_slots, set_cell_lock, timetable_classes,
 )
 from timetable_report import class_timetable_pdf, master_timetable_pdf, teacher_duty_pdf, timetable_excel
 from timetable_solver import solve
@@ -166,31 +166,31 @@ class TeacherWindow:
     @auth.require_permission("manage_timetable")
     def __init__(self, master):
         self.window = _themed_toplevel(master, "Timetable Teachers", "850x560")
-        self.name, self.phone, self.maximum = tk.StringVar(), tk.StringVar(), tk.StringVar(value="6")
+        self.name, self.phone, self.maximum, self.minimum_free = tk.StringVar(), tk.StringVar(), tk.StringVar(value="6"), tk.StringVar(value="1")
         self.active = tk.BooleanVar(value=True); self.selected_id = None
         form = ttk.Frame(self.window, padding=12); form.pack(fill="x")
-        for column, (text, variable) in enumerate((("Name", self.name), ("Phone", self.phone), ("Max/day", self.maximum))):
+        for column, (text, variable) in enumerate((("Name", self.name), ("Phone", self.phone), ("Max/day", self.maximum), ("Min free/day", self.minimum_free))):
             ttk.Label(form, text=text).grid(row=0, column=column * 2, padx=4); ttk.Entry(form, textvariable=variable, width=20).grid(row=0, column=column * 2 + 1, padx=4)
         ttk.Checkbutton(form, text="Active", variable=self.active).grid(row=1, column=0, pady=8)
         ttk.Button(form, text="Save", command=self.save).grid(row=1, column=1); ttk.Button(form, text="Availability", command=self.availability).grid(row=1, column=2); ttk.Button(form, text="Constraints", command=self.constraints).grid(row=1, column=3); ttk.Button(form, text="Delete", command=self.delete).grid(row=1, column=4)
-        self.tree = ttk.Treeview(self.window, columns=("name", "phone", "max", "active"), show="headings")
-        for column, text, width in (("name", "Teacher", 260), ("phone", "Phone", 140), ("max", "Max/day", 90), ("active", "Active", 80)):
+        self.tree = ttk.Treeview(self.window, columns=("name", "phone", "max", "free", "active"), show="headings")
+        for column, text, width in (("name", "Teacher", 240), ("phone", "Phone", 130), ("max", "Max/day", 90), ("free", "Min free/day", 100), ("active", "Active", 80)):
             self.tree.heading(column, text=text); self.tree.column(column, width=width)
         self.tree.pack(fill="both", expand=True, padx=12, pady=8); self.tree.bind("<<TreeviewSelect>>", self.select); self.refresh()
 
     def refresh(self):
         self.tree.delete(*self.tree.get_children())
         with _connect() as conn:
-            for row in list_teachers(conn): self.tree.insert("", "end", iid=str(row["id"]), values=(row["name"], row["phone"], row["max_periods_day"], "Yes" if row["is_active"] else "No"))
+            for row in list_teachers(conn): self.tree.insert("", "end", iid=str(row["id"]), values=(row["name"], row["phone"], row["max_periods_day"], row.get("min_free_periods_day", 1), "Yes" if row["is_active"] else "No"))
 
     def select(self, _event=None):
         selected = self.tree.selection()
         if not selected: return
-        self.selected_id = int(selected[0]); values = self.tree.item(selected[0], "values"); self.name.set(values[0]); self.phone.set(values[1]); self.maximum.set(values[2]); self.active.set(values[3] == "Yes")
+        self.selected_id = int(selected[0]); values = self.tree.item(selected[0], "values"); self.name.set(values[0]); self.phone.set(values[1]); self.maximum.set(values[2]); self.minimum_free.set(values[3]); self.active.set(values[4] == "Yes")
 
     def save(self):
         try:
-            with _connect() as conn: self.selected_id = save_teacher(conn, {"id": self.selected_id, "name": self.name.get(), "phone": self.phone.get(), "max_periods_day": self.maximum.get(), "is_active": self.active.get()}); conn.commit()
+            with _connect() as conn: self.selected_id = save_teacher(conn, {"id": self.selected_id, "name": self.name.get(), "phone": self.phone.get(), "max_periods_day": self.maximum.get(), "min_free_periods_day": self.minimum_free.get(), "is_active": self.active.get()}); conn.commit()
             self.refresh()
         except Exception as exc: messagebox.showerror("Teachers", str(exc), parent=self.window)
 
@@ -211,7 +211,7 @@ class TeacherWindow:
 
 
 class ScheduleConfigWindow:
-    FIELDS = (("Periods/day", "periods_per_day"), ("Working days", "working_days"), ("Period minutes", "period_duration_min"), ("Start HH:MM", "day_start_time"), ("Break after", "break_after_period"), ("Break minutes", "break_duration_min"), ("Lunch after", "lunch_after_period"), ("Lunch minutes", "lunch_duration_min"))
+    FIELDS = (("Periods/day", "periods_per_day"), ("Working days", "working_days"), ("Period minutes", "period_duration_min"), ("Start HH:MM", "day_start_time"), ("Assembly after (0 = before P1)", "assembly_after_period"), ("Assembly minutes", "assembly_duration_min"), ("Break after", "break_after_period"), ("Break minutes", "break_duration_min"), ("Lunch after", "lunch_after_period"), ("Lunch minutes", "lunch_duration_min"))
     def __init__(self, master):
         self.window = _themed_toplevel(master, "Schedule Configuration", "760x600"); self.vars = {}
         with _connect() as conn: config = get_schedule_config(conn)
@@ -242,7 +242,7 @@ class AssignmentWindow:
         self.teacher_var, self.subject_var, self.class_var = tk.StringVar(), tk.StringVar(), tk.StringVar()
         self.periods_var, self.double_var = tk.StringVar(value="5"), tk.BooleanVar()
         with _connect() as conn:
-            self.teachers = {row["name"]: row["id"] for row in list_teachers(conn, True)}; self.subjects = {f"{row['code']} — {row['name']}": row["id"] for row in list_subjects(conn, True)}; self.classes = [row[0] for row in conn.execute("SELECT name FROM classes WHERE is_active=1 ORDER BY name")]
+            self.teachers = {row["name"]: row["id"] for row in list_teachers(conn, True)}; self.subjects = {f"{row['code']} — {row['name']}": row["id"] for row in list_subjects(conn, True)}; self.classes = [row["name"] for row in timetable_classes(conn)]
         form = ttk.Frame(self.window, padding=12); form.pack(fill="x")
         for column, (label, variable, values) in enumerate((("Teacher", self.teacher_var, list(self.teachers)), ("Subject", self.subject_var, list(self.subjects)), ("Class", self.class_var, self.classes))):
             ttk.Label(form, text=label).grid(row=0, column=column); ttk.Combobox(form, textvariable=variable, values=values, state="readonly", width=28).grid(row=1, column=column, padx=4)
@@ -382,7 +382,7 @@ class TimetableWindow(WorkspacePage):
 
     def refresh_versions(self):
         with _connect() as conn:
-            versions = list_versions(conn); classes = [row[0] for row in conn.execute("SELECT name FROM classes WHERE is_active=1 ORDER BY name")]; teachers = list_teachers(conn, True)
+            versions = list_versions(conn); classes = [row["name"] for row in timetable_classes(conn)]; teachers = list_teachers(conn, True)
         self.version_map = {f"#{row['id']} — {row['label']}": row["id"] for row in versions}; values = tuple(self.version_map)
         for name in ("view_version", "teacher_version", "export_version"):
             combo = getattr(self, name, None)
@@ -443,7 +443,9 @@ class TimetableWindow(WorkspacePage):
         if not hasattr(self, "view_version"): return
         try:
             version_id = self.selected_version(self.view_version)
-            with _connect() as conn: classes = [row[0] for row in conn.execute("SELECT DISTINCT class_name FROM tt_timetable WHERE version_id=? ORDER BY class_name", (version_id,))]
+            with _connect() as conn:
+                included = {row["name"] for row in timetable_classes(conn)}
+                classes = [row[0] for row in conn.execute("SELECT DISTINCT class_name FROM tt_timetable WHERE version_id=? ORDER BY class_name", (version_id,)) if row[0] in included]
             self.class_combo.configure(values=classes); self.class_combo.set(classes[0] if classes else ""); self.render_class_grid()
         except ValueError: pass
 

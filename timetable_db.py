@@ -64,22 +64,31 @@ def save_schedule_config(conn, values: dict) -> None:
     _time(start)
     break_after = values.get("break_after_period")
     lunch_after = values.get("lunch_after_period")
+    assembly_after = values.get("assembly_after_period")
     break_after = int(break_after) if str(break_after or "").strip() else None
     lunch_after = int(lunch_after) if str(lunch_after or "").strip() else None
+    assembly_after = int(assembly_after) if str(assembly_after or "").strip() else None
     if periods <= 0 or duration <= 0:
         raise ValueError("Periods and duration must be positive.")
-    for position, label in ((break_after, "Break"), (lunch_after, "Lunch")):
-        if position is not None and not 1 <= position < periods:
-            raise ValueError(f"{label} position must be between period 1 and {periods - 1}.")
+    for position, label in ((break_after, "Break"), (lunch_after, "Lunch"), (assembly_after, "Assembly")):
+        if position is not None and not 0 <= position < periods:
+            raise ValueError(f"{label} position must be between before period 1 and period {periods - 1}.")
     payload = {
         "periods_per_day": periods, "working_days": ",".join(days),
         "period_duration_min": duration, "day_start_time": start,
         "break_after_period": break_after, "break_duration_min": int(values.get("break_duration_min") or 0),
         "lunch_after_period": lunch_after, "lunch_duration_min": int(values.get("lunch_duration_min") or 0),
+        "assembly_after_period": assembly_after, "assembly_duration_min": int(values.get("assembly_duration_min") or 0),
     }
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(tt_schedule_config)")}
+    if "assembly_after_period" not in columns:
+        conn.execute("ALTER TABLE tt_schedule_config ADD COLUMN assembly_after_period INTEGER")
+    if "assembly_duration_min" not in columns:
+        conn.execute("ALTER TABLE tt_schedule_config ADD COLUMN assembly_duration_min INTEGER NOT NULL DEFAULT 0")
     conn.execute(
         """UPDATE tt_schedule_config SET periods_per_day=?,working_days=?,period_duration_min=?,
-           day_start_time=?,break_after_period=?,break_duration_min=?,lunch_after_period=?,lunch_duration_min=? WHERE id=1""",
+           day_start_time=?,break_after_period=?,break_duration_min=?,lunch_after_period=?,lunch_duration_min=?,
+           assembly_after_period=?,assembly_duration_min=? WHERE id=1""",
         tuple(payload.values()),
     )
     _audit(conn, "TIMETABLE_CONFIG_SAVE", "tt_schedule_config", 1, old, payload)
@@ -92,6 +101,8 @@ def period_times(config: dict) -> list[tuple[str, str]]:
     current = _time(config["day_start_time"])
     result = []
     for period_no in range(1, count + 1):
+        if config.get("assembly_after_period") is not None and period_no == int(config["assembly_after_period"]) + 1:
+            current += timedelta(minutes=int(config.get("assembly_duration_min") or 0))
         end = current + timedelta(minutes=duration)
         result.append((current.strftime("%H:%M"), end.strftime("%H:%M")))
         current = end
@@ -141,15 +152,26 @@ def get_teacher(conn, teacher_id: int) -> dict | None:
 
 def save_teacher(conn, values: dict) -> int:
     teacher_id = values.get("id")
-    payload = (_require_text(values.get("name"), "Teacher name"), str(values.get("phone") or "").strip(), int(values.get("max_periods_day") or 6), int(values.get("is_active", 1)))
+    payload = (
+        _require_text(values.get("name"), "Teacher name"),
+        str(values.get("phone") or "").strip(),
+        int(values.get("max_periods_day") or 6),
+        int(values.get("min_free_periods_day") if str(values.get("min_free_periods_day", "")).strip() else 1),
+        int(values.get("is_active", 1)),
+    )
     if payload[2] <= 0:
         raise ValueError("Maximum periods per day must be positive.")
+    if payload[3] < 0:
+        raise ValueError("Minimum free periods per day cannot be negative.")
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(tt_teachers)")}
+    if "min_free_periods_day" not in columns:
+        conn.execute("ALTER TABLE tt_teachers ADD COLUMN min_free_periods_day INTEGER NOT NULL DEFAULT 1")
     if teacher_id:
         old = get_teacher(conn, int(teacher_id))
-        conn.execute("UPDATE tt_teachers SET name=?,phone=?,max_periods_day=?,is_active=? WHERE id=?", (*payload, int(teacher_id)))
+        conn.execute("UPDATE tt_teachers SET name=?,phone=?,max_periods_day=?,min_free_periods_day=?,is_active=? WHERE id=?", (*payload, int(teacher_id)))
         _audit(conn, "TIMETABLE_TEACHER_UPDATE", "tt_teachers", teacher_id, old, dict(values))
         return int(teacher_id)
-    cursor = conn.execute("INSERT INTO tt_teachers(name,phone,max_periods_day,is_active,created_at) VALUES(?,?,?,?,?)", (*payload, now_str()))
+    cursor = conn.execute("INSERT INTO tt_teachers(name,phone,max_periods_day,min_free_periods_day,is_active,created_at) VALUES(?,?,?,?,?,?)", (*payload, now_str()))
     _audit(conn, "TIMETABLE_TEACHER_CREATE", "tt_teachers", cursor.lastrowid, None, dict(values))
     return int(cursor.lastrowid)
 
@@ -297,8 +319,31 @@ def list_timetable(conn, version_id: int, class_name: str | None = None, teacher
         WHERE {' AND '.join(clauses)} ORDER BY x.class_name,CASE x.day WHEN 'MON' THEN 1 WHEN 'TUE' THEN 2 WHEN 'WED' THEN 3 WHEN 'THU' THEN 4 WHEN 'FRI' THEN 5 ELSE 6 END,x.period_no""", params))
 
 
+def timetable_classes(conn) -> list[dict]:
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(classes)")}
+    fields = "id,name,is_active"
+    if "is_in_timetable" in columns:
+        fields += ",is_in_timetable"
+        timetable_clause = " AND is_in_timetable=1"
+    else:
+        fields += ",1 AS is_in_timetable"
+        timetable_clause = ""
+    if "class_teacher_id" in columns:
+        fields += ",class_teacher_id"
+    else:
+        fields += ",NULL AS class_teacher_id"
+    return _rows(conn.execute(f"SELECT {fields} FROM classes WHERE is_active=1{timetable_clause} ORDER BY name"))
+
+
 def validate_slot(conn, version_id: int, class_name: str, day: str, period_no: int, subject_id: int | None, teacher_id: int | None, exclude_current: bool = True) -> None:
+    class_row = _row(conn.execute("SELECT * FROM classes WHERE name=?", (class_name,)))
+    class_teacher_id = class_row.get("class_teacher_id") if class_row and "class_teacher_id" in class_row else None
+    if int(period_no) == 1 and class_teacher_id:
+        if teacher_id != class_teacher_id:
+            raise ValueError("Period 1 is reserved for the assigned class teacher.")
     if subject_id is None or teacher_id is None:
+        if int(period_no) == 1 and class_teacher_id:
+            raise ValueError("Period 1 cannot be free for a class with an assigned class teacher.")
         return
     assignment = conn.execute("SELECT 1 FROM tt_assignments WHERE teacher_id=? AND subject_id=? AND class_name=?", (teacher_id, subject_id, class_name)).fetchone()
     if assignment is None:
@@ -315,8 +360,16 @@ def validate_slot(conn, version_id: int, class_name: str, day: str, period_no: i
     if conn.execute(sql, params).fetchone():
         raise ValueError("The teacher is already assigned to another class in this period.")
     teacher = get_teacher(conn, teacher_id)
-    assigned = conn.execute("SELECT COUNT(*) FROM tt_timetable WHERE version_id=? AND teacher_id=? AND day=? AND class_name<>?", (version_id, teacher_id, day, class_name)).fetchone()[0]
-    if teacher and assigned >= int(teacher["max_periods_day"]):
+    assigned_sql = "SELECT COUNT(*) FROM tt_timetable WHERE version_id=? AND teacher_id=? AND day=?"
+    assigned_params: list = [version_id, teacher_id, day]
+    if exclude_current:
+        assigned_sql += " AND NOT (class_name=? AND period_no=?)"
+        assigned_params.extend([class_name, period_no])
+    assigned = conn.execute(assigned_sql, assigned_params).fetchone()[0]
+    effective_max = int(teacher["max_periods_day"]) if teacher else 0
+    if teacher:
+        effective_max = min(effective_max, int(config["periods_per_day"]) - int(teacher.get("min_free_periods_day", 1) or 0))
+    if teacher and assigned >= effective_max:
         raise ValueError("The teacher has reached the daily period limit.")
 
 
@@ -355,7 +408,9 @@ def build_problem(conn) -> dict:
     config = get_schedule_config(conn)
     days = [day for day in str(config["working_days"]).split(",") if day]
     periods = list(range(1, int(config["periods_per_day"]) + 1))
-    classes = [row[0] for row in conn.execute("SELECT name FROM classes WHERE is_active=1 ORDER BY name")]
+    class_rows = timetable_classes(conn)
+    classes = [row["name"] for row in class_rows]
+    class_teachers = {row["name"]: row.get("class_teacher_id") for row in class_rows if row.get("class_teacher_id")}
     subjects = {row["id"]: row for row in list_subjects(conn, True)}
     teachers = {row["id"]: row for row in list_teachers(conn, True)}
     requirements = [row for row in list_requirements(conn) if row["class_name"] in classes and row["subject_id"] in subjects]
@@ -373,4 +428,5 @@ def build_problem(conn) -> dict:
         "period_times": period_times(config), "subjects": subjects, "teachers": teachers,
         "requirements": requirements, "assignments": assignments,
         "availability": availability, "constraints": constraints,
+        "class_teachers": class_teachers,
     }

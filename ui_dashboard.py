@@ -217,12 +217,18 @@ class DashboardWindow(tk.Toplevel):
             },
             "cashbook": {
                 "title": "Cashbook Management", "icon": "▤", "color": "#247a63",
-                "description": "Income, expenses, vouchers, bank statements, account balances and cash closing.",
+                "description": "Income, expenses, balances, imports, transactions, vouchers, bills and audit reports.",
                 "items": (
-                    ("cashbook", "view_cashbook", "View Cashbook", "Search transactions, balances, custom-period summaries and print reports.", self._on_cashbook_click),
-                    ("cashbook_add", "manage_cashbook", "Income / Expense Adder", "Add income, expenses, payment vouchers, heads and accounts.", self._on_cashbook_click),
-                    ("bank_statement", "manage_cashbook", "Bank Statements Upload & Analyse", "Upload Central Bank of India CSV statements and match entries.", self._on_cashbook_click),
+                    ("cashbook_expense", "manage_cashbook", "Add Expense", "Record expenses and payments.", lambda: self._on_cashbook_click("expense")),
+                    ("cashbook_income", "manage_cashbook", "Add Income", "Record manual income.", lambda: self._on_cashbook_click("income")),
+                    ("cashbook_balances", "view_cashbook", "View Balances", "Review account balances and vehicle expenses.", lambda: self._on_cashbook_click("balances")),
+                    ("cashbook_import", "manage_cashbook", "Import Collections", "Import current or past fee receipts as income.", lambda: self._on_cashbook_click("import")),
+                    ("cashbook_transactions", "view_cashbook", "View / Print Cashbook", "Filter, view and print cashbook transactions.", lambda: self._on_cashbook_click("transactions")),
+                    ("cashbook_vouchers", "manage_cashbook", "Vouchers & Bills", "Create and print vouchers and bills.", lambda: self._on_cashbook_click("vouchers")),
+                    ("cashbook_audit", "view_cashbook", "Audit Reports", "Review and print cashbook audit reports.", lambda: self._on_cashbook_click("audit")),
+                    ("bank_statement", "manage_cashbook", "Bank Statements Upload & Analyse", "Upload Central Bank of India CSV statements and match entries.", lambda: self._on_cashbook_click("bank")),
                 ),
+                "planned": ("Daily Cashbook",),
             },
             "timetable": {
                 "title": "Timetable Management", "icon": "▦", "color": "#3467b2",
@@ -875,12 +881,12 @@ class DashboardWindow(tk.Toplevel):
         self._show_workspace_page(ReportsWindow, "Reports", "reports")
 
     @auth.require_permission("view_cashbook")
-    def _on_cashbook_click(self) -> None:
+    def _on_cashbook_click(self, initial_tab: str = "transactions") -> None:
         """Open cashbook management, reports, vouchers, and bank analysis."""
         auth.touch_session()
         from ui_cashbook import CashbookWindow
 
-        self._show_workspace_page(CashbookWindow, "Cashbook", "cashbook")
+        self._show_workspace_page(lambda master, embedded=False: CashbookWindow(master, embedded=embedded, initial_tab=initial_tab), "Cashbook", "cashbook")
 
     @auth.require_permission("view_timetable")
     def _on_timetable_click(self) -> None:
