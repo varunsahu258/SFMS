@@ -33,7 +33,7 @@ def _password_hash(password: str) -> str:
 class UserManagementWindow(WorkspacePage):
     """Create, activate, reset, and unlock accountant accounts."""
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("manage_users")
     def __init__(self, master=None, *, embedded: bool = False):
         super().__init__(master, embedded=embedded)
         self.title("User Management")

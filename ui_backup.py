@@ -46,7 +46,7 @@ def _format_size(size: int) -> str:
 class BackupWindow(WorkspacePage):
     """Manage local, encrypted, scheduled, Drive, restore, and archive backups."""
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("manage_backup")
     def __init__(self, master=None, *, embedded: bool = False):
         """Create all administrator backup-management sections."""
         super().__init__(master, embedded=embedded)

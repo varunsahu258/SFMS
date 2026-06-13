@@ -1,4 +1,4 @@
-"""Administrator UI for configuring per-accountant application permissions."""
+"""Administrator UI for configuring role and module permissions."""
 
 from __future__ import annotations
 
@@ -14,12 +14,12 @@ from utils import now_str
 
 
 class AccountantPermissionsWindow(WorkspacePage):
-    """Allow administrators to grant or revoke delegable accountant capabilities."""
+    """Allow permitted administrators to grant or revoke function-level capabilities."""
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("manage_permissions")
     def __init__(self, master=None, *, embedded: bool = False):
         super().__init__(master, embedded=embedded)
-        self.title("Accountant Permissions")
+        self.title("Role & Module Permissions")
         self.geometry("760x720")
         self.configure(bg=SPLASH_BG)
         self.accountant_var = tk.StringVar()
@@ -30,20 +30,20 @@ class AccountantPermissionsWindow(WorkspacePage):
 
     def _build_widgets(self) -> None:
         tk.Label(
-            self, text="Accountant Permissions", bg=SPLASH_BG, fg=SPLASH_FG,
+            self, text="Role & Module Permissions", bg=SPLASH_BG, fg=SPLASH_FG,
             font=("Segoe UI", 20, "bold"),
         ).pack(pady=(18, 4))
         tk.Label(
             self,
             text=("Select an accountant and choose exactly what that account may access. "
-                  "User management, permission management, backup/restore, and application settings "
-                  "always remain administrator-only."),
+                  "Every dashboard module plus sensitive functions such as users, backup, settings, "
+                  "and permission management are represented here; administrators always keep all access."),
             bg=SPLASH_BG, fg=SPLASH_FG, wraplength=700, justify="left",
         ).pack(fill="x", padx=24, pady=(0, 14))
 
         selector = tk.Frame(self, bg=SPLASH_BG)
         selector.pack(fill="x", padx=24, pady=(0, 12))
-        tk.Label(selector, text="Accountant", bg=SPLASH_BG, fg=SPLASH_FG).pack(side="left")
+        tk.Label(selector, text="Role user", bg=SPLASH_BG, fg=SPLASH_FG).pack(side="left")
         self.accountant_combo = ttk.Combobox(
             selector, textvariable=self.accountant_var, state="readonly", width=34
         )
@@ -122,11 +122,11 @@ class AccountantPermissionsWindow(WorkspacePage):
         for variable in self.permission_vars.values():
             variable.set(False)
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("manage_permissions")
     def save_permissions(self) -> None:
         user_id = self._selected_user_id()
         if user_id is None:
-            messagebox.showerror("Accountant Permissions", "Create or select an accountant first.", parent=self)
+            messagebox.showerror("Role & Module Permissions", "Create or select an accountant first.", parent=self)
             return
         new_values = {key: bool(variable.get()) for key, variable in self.permission_vars.items()}
         with connect_db() as conn:
@@ -145,4 +145,4 @@ class AccountantPermissionsWindow(WorkspacePage):
                 ],
             )
             audit(conn, "ACCOUNTANT_PERMISSIONS_UPDATE", "user_permissions", user_id, old_values, new_values)
-        messagebox.showinfo("Accountant Permissions", "Permissions saved. They apply on the accountant’s next dashboard login.", parent=self)
+        messagebox.showinfo("Role & Module Permissions", "Permissions saved. They apply immediately to the selected user’s next action or login.", parent=self)

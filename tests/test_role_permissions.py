@@ -101,5 +101,6 @@ def test_ui_actions_use_specific_permissions_and_security_admin_stays_admin_only
     assert _guarded_permission(ClassSectionWindow.__init__) == "manage_classes"
     assert _guarded_permission(ReprintWindow.__init__) == "reprint_receipts"
     assert _guarded_permission(VoidPaymentWindow.__init__) == "void_payments"
-    assert inspect.getclosurevars(AccountantPermissionsWindow.__init__).nonlocals["roles"] == ("ADMIN",)
-    assert inspect.getclosurevars(UserManagementWindow.__init__).nonlocals["roles"] == ("ADMIN",)
+    assert _guarded_permission(AccountantPermissionsWindow.__init__) == "manage_permissions"
+    assert _guarded_permission(AccountantPermissionsWindow.save_permissions) == "manage_permissions"
+    assert _guarded_permission(UserManagementWindow.__init__) == "manage_users"

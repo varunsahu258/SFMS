@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill
-from openpyxl.utils import get_column_letter
+try:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    from openpyxl.utils import get_column_letter
+except ModuleNotFoundError:  # optional Excel dependency in lightweight installs
+    Workbook = Font = PatternFill = get_column_letter = None
 
 from config import REPORTS_DIR
 from security_utils import sanitize_excel_cell
@@ -43,6 +46,13 @@ def export_to_excel(
     Path(REPORTS_DIR).mkdir(parents=True, exist_ok=True)
     output_name = filename if str(filename).lower().endswith(".xlsx") else f"{filename}.xlsx"
     output_path = str(Path(REPORTS_DIR) / output_name)
+
+    if Workbook is None:
+        with open(output_path, "w", encoding="utf-8") as handle:
+            handle.write(",".join(headers) + "\n")
+            for item in data:
+                handle.write(",".join(sanitize_excel_cell(str(item.get(header, ""))).replace("\n", " ") for header in headers) + "\n")
+        return output_path
 
     workbook = Workbook()
     data_sheet = workbook.active

@@ -6,9 +6,12 @@ import json
 import sqlite3
 from pathlib import Path
 
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
+try:
+    from google.oauth2.credentials import Credentials
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaFileUpload
+except ModuleNotFoundError:  # optional Google Drive dependency
+    Credentials = build = MediaFileUpload = None
 
 import auth
 from config import DB_PATH
@@ -33,7 +36,7 @@ def upload_to_drive(filepath) -> str | None:
     path = Path(filepath)
     with _connect() as conn:
         token_json = load_oauth_token()
-        if not token_json:
+        if not token_json or Credentials is None or build is None or MediaFileUpload is None:
             return None
         if not path.is_file():
             raise FileNotFoundError(str(path))
