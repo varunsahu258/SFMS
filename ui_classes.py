@@ -23,6 +23,9 @@ class ClassSectionWindow(WorkspacePage):
         self.configure(bg=SPLASH_BG)
         self.class_var = tk.StringVar()
         self.section_var = tk.StringVar()
+        self.in_timetable_var = tk.BooleanVar(value=True)
+        self.class_teacher_var = tk.StringVar()
+        self.teacher_map: dict[str, int | None] = {"None": None}
         self._build_widgets()
         self.refresh()
 
@@ -37,14 +40,19 @@ class ClassSectionWindow(WorkspacePage):
         tk.Label(form, text="Class", bg=SPLASH_BG, fg=SPLASH_FG).grid(row=0, column=0, sticky="w")
         ttk.Entry(form, textvariable=self.class_var, width=25).grid(row=0, column=1, padx=8)
         ttk.Button(form, text="Add Class", command=self.add_class).grid(row=0, column=2, padx=4)
+        ttk.Checkbutton(form, text="Include in timetable", variable=self.in_timetable_var).grid(row=0, column=3, padx=8, sticky="w")
+        tk.Label(form, text="Class teacher", bg=SPLASH_BG, fg=SPLASH_FG).grid(row=1, column=3, sticky="w")
+        self.teacher_combo = ttk.Combobox(form, textvariable=self.class_teacher_var, state="readonly", width=24)
+        self.teacher_combo.grid(row=1, column=4, padx=8, pady=10)
         tk.Label(form, text="Section", bg=SPLASH_BG, fg=SPLASH_FG).grid(row=1, column=0, sticky="w", pady=10)
         ttk.Entry(form, textvariable=self.section_var, width=25).grid(row=1, column=1, padx=8, pady=10)
         ttk.Button(form, text="Add Section to Selected Class", command=self.add_section).grid(row=1, column=2, padx=4)
 
-        columns = ("class", "section", "status")
+        columns = ("class", "section", "status", "timetable", "teacher")
         self.tree = ttk.Treeview(self, columns=columns, show="headings", selectmode="browse")
         for column, heading_text, width in (
-            ("class", "Class", 260), ("section", "Section", 220), ("status", "Status", 100)
+            ("class", "Class", 220), ("section", "Section", 160), ("status", "Status", 90),
+            ("timetable", "Timetable", 90), ("teacher", "Class Teacher", 150),
         ):
             self.tree.heading(column, text=heading_text)
             self.tree.column(column, width=width)
@@ -54,22 +62,43 @@ class ClassSectionWindow(WorkspacePage):
         controls.pack(fill="x", padx=18, pady=(0, 16))
         ttk.Button(controls, text="Deactivate Selected Section", command=self.deactivate_selected).pack(side="left")
         ttk.Button(controls, text="Deactivate Class", command=self.deactivate_class).pack(side="left", padx=8)
+        ttk.Button(controls, text="Save Timetable Settings", command=self.save_timetable_settings).pack(side="left", padx=8)
         ttk.Button(controls, text="Refresh", command=self.refresh).pack(side="left")
 
     def refresh(self) -> None:
         auth.touch_session()
         self.tree.delete(*self.tree.get_children())
         with connect_db() as conn:
+            class_columns = {row[1] for row in conn.execute("PRAGMA table_info(classes)")}
+            if "is_in_timetable" not in class_columns:
+                conn.execute("ALTER TABLE classes ADD COLUMN is_in_timetable INTEGER NOT NULL DEFAULT 1")
+            if "class_teacher_id" not in class_columns:
+                conn.execute("ALTER TABLE classes ADD COLUMN class_teacher_id INTEGER REFERENCES tt_teachers(id)")
+            self.teacher_map = {"None": None}
+            try:
+                for teacher in conn.execute("SELECT id,name FROM tt_teachers WHERE is_active=1 ORDER BY name"):
+                    self.teacher_map[teacher["name"]] = teacher["id"]
+            except Exception:
+                pass
             rows = conn.execute(
                 """SELECT c.id AS class_id,c.name AS class_name,c.is_active AS class_active,
+                          c.is_in_timetable,c.class_teacher_id,t.name AS class_teacher_name,
                           s.id AS section_id,s.name AS section_name,s.is_active AS section_active
                    FROM classes c LEFT JOIN sections s ON s.class_id=c.id
+                   LEFT JOIN tt_teachers t ON t.id=c.class_teacher_id
                    ORDER BY c.name,s.name"""
             ).fetchall()
+            conn.commit()
+        self.teacher_combo.configure(values=tuple(self.teacher_map))
+        if not self.class_teacher_var.get():
+            self.class_teacher_var.set("None")
         for row in rows:
             active = bool(row["class_active"]) and (row["section_id"] is None or bool(row["section_active"]))
             iid = f"{row['class_id']}:{row['section_id'] or 0}"
-            self.tree.insert("", "end", iid=iid, values=(row["class_name"], row["section_name"] or "", "Active" if active else "Inactive"))
+            self.tree.insert("", "end", iid=iid, values=(
+                row["class_name"], row["section_name"] or "", "Active" if active else "Inactive",
+                "Yes" if row["is_in_timetable"] else "No", row["class_teacher_name"] or "",
+            ))
 
     def _selection_changed(self, _event=None) -> None:
         selected = self.tree.selection()
@@ -77,6 +106,8 @@ class ClassSectionWindow(WorkspacePage):
             values = self.tree.item(selected[0], "values")
             self.class_var.set(values[0])
             self.section_var.set(values[1])
+            self.in_timetable_var.set(values[3] == "Yes")
+            self.class_teacher_var.set(values[4] or "None")
 
     @auth.require_permission("manage_classes")
     def add_class(self) -> None:
@@ -89,15 +120,33 @@ class ClassSectionWindow(WorkspacePage):
         with connect_db() as conn:
             existing = conn.execute("SELECT id,is_active FROM classes WHERE name=?", (name,)).fetchone()
             if existing:
-                conn.execute("UPDATE classes SET is_active=1 WHERE id=?", (existing["id"],))
+                conn.execute("UPDATE classes SET is_active=1,is_in_timetable=?,class_teacher_id=? WHERE id=?", (int(self.in_timetable_var.get()), self.teacher_map.get(self.class_teacher_var.get()), existing["id"]))
                 class_id = existing["id"]
                 action = "CLASS_REACTIVATE"
             else:
-                cursor = conn.execute("INSERT INTO classes(name,is_active,created_at) VALUES(?,1,?)", (name, now_str()))
+                cursor = conn.execute("INSERT INTO classes(name,is_active,created_at,is_in_timetable,class_teacher_id) VALUES(?,1,?,?,?)", (name, now_str(), int(self.in_timetable_var.get()), self.teacher_map.get(self.class_teacher_var.get())))
                 class_id = cursor.lastrowid
                 action = "CLASS_ADD"
-            audit(conn, action, "classes", class_id, None, {"name": name, "is_active": 1})
+            audit(conn, action, "classes", class_id, None, {"name": name, "is_active": 1, "is_in_timetable": int(self.in_timetable_var.get()), "class_teacher_id": self.teacher_map.get(self.class_teacher_var.get())})
         self.section_var.set("")
+        self.refresh()
+
+    @auth.require_permission("manage_classes")
+    def save_timetable_settings(self) -> None:
+        if not ensure_permission_write("manage_classes"):
+            return
+        class_name = self.class_var.get().strip()
+        if not class_name:
+            messagebox.showwarning("Classes", "Select or enter a class.", parent=self)
+            return
+        with connect_db() as conn:
+            row = conn.execute("SELECT id FROM classes WHERE name=?", (class_name,)).fetchone()
+            if row is None:
+                messagebox.showerror("Classes", "Class was not found.", parent=self)
+                return
+            payload = {"class": class_name, "is_in_timetable": int(self.in_timetable_var.get()), "class_teacher_id": self.teacher_map.get(self.class_teacher_var.get())}
+            conn.execute("UPDATE classes SET is_in_timetable=?,class_teacher_id=? WHERE id=?", (payload["is_in_timetable"], payload["class_teacher_id"], row["id"]))
+            audit(conn, "CLASS_TIMETABLE_SETTINGS", "classes", row["id"], None, payload)
         self.refresh()
 
     @auth.require_permission("manage_classes")

@@ -6,6 +6,7 @@ import sqlite3
 
 from cashbook_service import (
     add_transaction,
+    cashbook_audit_rows,
     collection_candidates,
     ensure_student_extra_columns,
     import_collection_receipts,
@@ -112,3 +113,26 @@ def test_import_collection_receipts_is_idempotent() -> None:
     assert import_collection_receipts(conn, [1], "CBI", None) == 0
     state = summary(conn, "12-06-2026", "12-06-2026")
     assert state["income_total"] == 500
+
+
+def test_collection_import_accepts_legacy_generic_receipts_and_audits_source() -> None:
+    conn = _conn()
+    student_id = conn.execute("INSERT INTO students(name,class,status) VALUES('Neha','Class 2','ACTIVE')").lastrowid
+    conn.execute(
+        "INSERT INTO receipts(id,receipt_no,total_paid,receipt_type,printed_at,student_id) VALUES(2,'RCP-2026-000002',700,'FEE RECEIPT','2026-06-12 11:00:00',?)",
+        (student_id,),
+    )
+    conn.execute(
+        "INSERT INTO payments(receipt_no,student_id,payment_mode,cheque_number) VALUES('RCP-2026-000002',?,'CHEQUE','CHQ55')",
+        (student_id,),
+    )
+
+    candidates = collection_candidates(conn, include_main=True, include_small=False, include_exemption=False)
+    assert [row["receipt_id"] for row in candidates] == [2]
+    assert import_collection_receipts(conn, [2], "CBI", None) == 1
+
+    state = summary(conn, "12-06-2026", "12-06-2026")
+    assert state["income_total"] == 700
+    audit_rows = cashbook_audit_rows(conn, "12-06-2026", "12-06-2026", "COLLECTION_RECEIPT")
+    assert len(audit_rows) == 1
+    assert audit_rows[0]["receipt_no"] == "RCP-2026-000002"

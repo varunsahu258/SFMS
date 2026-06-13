@@ -14,7 +14,7 @@ from reportlab.lib.units import mm
 from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from config import REPORTS_DIR, SCHOOL_NAME
-from timetable_db import get_schedule_config, get_teacher, get_version, list_timetable, period_times
+from timetable_db import get_schedule_config, get_teacher, get_version, list_timetable, period_times, timetable_classes
 
 DARK = colors.HexColor("#5b3fc0")
 PASTELS = ("E8F1FF", "E5F7EC", "FFF0E3", "F4E8FF", "FFF8D9", "E5F7F6")
@@ -97,6 +97,9 @@ def _grid_table(data: list[list]) -> Table:
 
 def class_timetable_pdf(conn, version_id: int, class_name: str) -> str:
     version = _version(conn, version_id)
+    included = {row["name"] for row in timetable_classes(conn)}
+    if class_name not in included:
+        raise ValueError("This class is excluded from timetable exports.")
     data, _days = _grid_data(conn, version_id, class_name)
     path = _path(f"timetable_class_{re.sub(r'[^A-Za-z0-9_-]+', '_', class_name)}", "pdf")
     story = _title_story(conn, f"Class Timetable — {class_name}", version)
@@ -107,7 +110,8 @@ def class_timetable_pdf(conn, version_id: int, class_name: str) -> str:
 
 def master_timetable_pdf(conn, version_id: int) -> str:
     version = _version(conn, version_id)
-    classes = [row[0] for row in conn.execute("SELECT DISTINCT class_name FROM tt_timetable WHERE version_id=? ORDER BY class_name", (version_id,))]
+    included = {row["name"] for row in timetable_classes(conn)}
+    classes = [row[0] for row in conn.execute("SELECT DISTINCT class_name FROM tt_timetable WHERE version_id=? ORDER BY class_name", (version_id,)) if row[0] in included]
     if not classes:
         raise ValueError("This version has no timetable slots.")
     path = _path("timetable_master", "pdf")
@@ -145,7 +149,8 @@ def teacher_duty_pdf(conn, version_id: int, teacher_id: int) -> str:
 
 def timetable_excel(conn, version_id: int) -> str:
     version = _version(conn, version_id)
-    classes = [row[0] for row in conn.execute("SELECT DISTINCT class_name FROM tt_timetable WHERE version_id=? ORDER BY class_name", (version_id,))]
+    included = {row["name"] for row in timetable_classes(conn)}
+    classes = [row[0] for row in conn.execute("SELECT DISTINCT class_name FROM tt_timetable WHERE version_id=? ORDER BY class_name", (version_id,)) if row[0] in included]
     if not classes:
         raise ValueError("This version has no timetable slots.")
     workbook = Workbook()

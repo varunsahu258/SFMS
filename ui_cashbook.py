@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import tkinter as tk
+import os
+import subprocess
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import auth
@@ -11,6 +13,7 @@ from cashbook_service import (
     PAYMENT_METHODS,
     add_account,
     add_transaction,
+    cashbook_audit_rows,
     collection_candidates,
     import_bank_statement_csv,
     import_collection_receipts,
@@ -19,6 +22,7 @@ from cashbook_service import (
     list_accounts,
     list_heads,
     parse_date,
+    print_cashbook_audit_report,
     print_cashbook_report,
     print_voucher,
     set_head_active,
@@ -37,7 +41,7 @@ class CashbookWindow(WorkspacePage):
     """Manage school cashbook transactions and bank-statement analysis."""
 
     @auth.require_permission("view_cashbook")
-    def __init__(self, master=None, *, embedded: bool = False):
+    def __init__(self, master=None, *, embedded: bool = False, initial_tab: str = "transactions"):
         super().__init__(master, embedded=embedded)
         self.title("Cashbook")
         self.geometry("1280x760")
@@ -47,6 +51,8 @@ class CashbookWindow(WorkspacePage):
         self.account_var = tk.StringVar(value=ACCOUNT_CASH)
         self.head_filter_var = tk.StringVar(value="All Heads")
         self.income_vars: dict[int, tk.BooleanVar] = {}
+        self.initial_tab = initial_tab
+        self.tabs: dict[str, ttk.Frame] = {}
         self.include_main = tk.BooleanVar(value=True)
         self.include_small = tk.BooleanVar(value=True)
         self.include_exemption = tk.BooleanVar(value=True)
@@ -54,6 +60,12 @@ class CashbookWindow(WorkspacePage):
             install_cashbook_schema(conn)
         self._build_widgets()
         self.refresh_all()
+        self.show_tab(initial_tab)
+
+    def show_tab(self, tab_key: str) -> None:
+        tab = self.tabs.get(tab_key)
+        if tab is not None:
+            self.notebook.select(tab)
 
     def _build_widgets(self) -> None:
         page = ttk.Frame(self, padding=16)
@@ -82,15 +94,18 @@ class CashbookWindow(WorkspacePage):
         self.notebook = ttk.Notebook(page)
         self.notebook.pack(fill="both", expand=True)
         self._build_transactions_tab()
-        self._build_add_tab("INCOME")
         self._build_add_tab("EXPENSE")
-        self._build_heads_tab()
-        self._build_import_tab()
-        self._build_bank_tab()
+        self._build_add_tab("INCOME")
         self._build_balances_tab()
+        self._build_import_tab()
+        self._build_vouchers_tab()
+        self._build_audit_tab()
+        self._build_heads_tab()
+        self._build_bank_tab()
 
     def _build_transactions_tab(self) -> None:
         tab = ttk.Frame(self.notebook, padding=8)
+        self.tabs["transactions"] = tab
         self.notebook.add(tab, text="View / Search Transactions")
         columns = ("date", "type", "head", "description", "method", "account", "reference", "amount", "voucher")
         self.transaction_tree = ttk.Treeview(tab, columns=columns, show="headings", selectmode="browse")
@@ -111,6 +126,7 @@ class CashbookWindow(WorkspacePage):
     def _build_add_tab(self, txn_type: str) -> None:
         title = "Income Adder" if txn_type == "INCOME" else "Expense Adder"
         tab = ttk.Frame(self.notebook, padding=16)
+        self.tabs["income" if txn_type == "INCOME" else "expense"] = tab
         self.notebook.add(tab, text=title)
         vars_ = {
             "date": tk.StringVar(value=today_str()),
@@ -148,6 +164,7 @@ class CashbookWindow(WorkspacePage):
 
     def _build_heads_tab(self) -> None:
         tab = ttk.Frame(self.notebook, padding=10)
+        self.tabs["heads"] = tab
         self.notebook.add(tab, text="Head Manager")
         form = ttk.LabelFrame(tab, text="Add Head", padding=10)
         form.pack(fill="x")
@@ -168,6 +185,7 @@ class CashbookWindow(WorkspacePage):
 
     def _build_import_tab(self) -> None:
         tab = ttk.Frame(self.notebook, padding=10)
+        self.tabs["import"] = tab
         self.notebook.add(tab, text="Import Collections")
         opts = ttk.LabelFrame(tab, text="Collections to include as income", padding=10)
         opts.pack(fill="x")
@@ -189,6 +207,7 @@ class CashbookWindow(WorkspacePage):
 
     def _build_bank_tab(self) -> None:
         tab = ttk.Frame(self.notebook, padding=10)
+        self.tabs["bank"] = tab
         self.notebook.add(tab, text="Bank Statements")
         controls = ttk.Frame(tab)
         controls.pack(fill="x")
@@ -206,6 +225,7 @@ class CashbookWindow(WorkspacePage):
 
     def _build_balances_tab(self) -> None:
         tab = ttk.Frame(self.notebook, padding=10)
+        self.tabs["balances"] = tab
         self.notebook.add(tab, text="Balances / Vehicle Expenses")
         self.balance_text = tk.Text(tab, height=12, wrap="word", state="disabled")
         self.balance_text.pack(fill="x")
@@ -216,6 +236,38 @@ class CashbookWindow(WorkspacePage):
             self.vehicle_tree.column(column, width=width)
         self.vehicle_tree.pack(fill="both", expand=True)
 
+    def _build_vouchers_tab(self) -> None:
+        tab = ttk.Frame(self.notebook, padding=10)
+        self.tabs["vouchers"] = tab
+        self.notebook.add(tab, text="Vouchers / Bills")
+        ttk.Label(tab, text="Select a transaction to generate or re-open its receipt/payment voucher.", style="Muted.TLabel").pack(anchor="w", pady=(0, 8))
+        columns = ("date", "type", "head", "counterparty", "amount", "voucher")
+        self.voucher_tree = ttk.Treeview(tab, columns=columns, show="headings", selectmode="browse")
+        for column, heading, width in (
+            ("date", "Date", 90), ("type", "Type", 90), ("head", "Head", 180),
+            ("counterparty", "Party", 240), ("amount", "Amount", 110), ("voucher", "Voucher", 120),
+        ):
+            self.voucher_tree.heading(column, text=heading)
+            self.voucher_tree.column(column, width=width)
+        self.voucher_tree.pack(fill="both", expand=True)
+        ttk.Button(tab, text="Print Selected Voucher / Bill", command=self.print_selected_voucher, style="Accent.TButton").pack(anchor="w", pady=8)
+
+    def _build_audit_tab(self) -> None:
+        tab = ttk.Frame(self.notebook, padding=10)
+        self.tabs["audit"] = tab
+        self.notebook.add(tab, text="Audit Reports")
+        ttk.Button(tab, text="Print Cashbook Audit Report", command=self.print_audit_report, style="Accent.TButton").pack(anchor="w", pady=(0, 8))
+        columns = ("id", "date", "type", "head", "amount", "source", "receipt", "voucher", "created", "user")
+        self.audit_tree = ttk.Treeview(tab, columns=columns, show="headings")
+        for column, heading, width in (
+            ("id", "ID", 60), ("date", "Date", 90), ("type", "Type", 80), ("head", "Head", 150),
+            ("amount", "Amount", 100), ("source", "Source", 130), ("receipt", "Receipt/Ref", 130),
+            ("voucher", "Voucher", 115), ("created", "Created", 150), ("user", "User", 120),
+        ):
+            self.audit_tree.heading(column, text=heading)
+            self.audit_tree.column(column, width=width)
+        self.audit_tree.pack(fill="both", expand=True)
+
     def refresh_all(self) -> None:
         auth.touch_session()
         self.refresh_lookups()
@@ -223,6 +275,8 @@ class CashbookWindow(WorkspacePage):
         self.refresh_heads()
         self.refresh_balances()
         self.refresh_bank_rows()
+        self.refresh_vouchers()
+        self.refresh_audit_rows()
 
     def refresh_lookups(self) -> None:
         with connect_db() as conn:
@@ -233,10 +287,20 @@ class CashbookWindow(WorkspacePage):
             combo = getattr(self, combo_name, None)
             if combo is not None:
                 combo.configure(values=accounts)
+        if accounts and self.import_account_var.get() not in accounts:
+            self.import_account_var.set(accounts[0])
         if hasattr(self, "income_head_combo"):
             self.income_head_combo.configure(values=income_heads)
+            if income_heads and not self.income_form["head"].get():
+                self.income_form["head"].set(income_heads[0])
         if hasattr(self, "expense_head_combo"):
             self.expense_head_combo.configure(values=expense_heads)
+            if expense_heads and not self.expense_form["head"].get():
+                self.expense_form["head"].set(expense_heads[0])
+        for form_name in ("income_form", "expense_form"):
+            form = getattr(self, form_name, None)
+            if form and accounts and form["account"].get() not in accounts:
+                form["account"].set(accounts[0])
 
     def refresh_transactions(self) -> None:
         for item in self.transaction_tree.get_children():
@@ -248,6 +312,32 @@ class CashbookWindow(WorkspacePage):
                 row["txn_date"], row["txn_type"], row["head_name"], row["description"] or "",
                 row["payment_method"], row["account_name"], row["reference"] or "",
                 format_currency(row["amount"]), row["voucher_no"] or "",
+            ))
+
+    def refresh_vouchers(self) -> None:
+        if not hasattr(self, "voucher_tree"):
+            return
+        self.voucher_tree.delete(*self.voucher_tree.get_children())
+        with connect_db() as conn:
+            rows = transactions(conn, self.start_var.get(), self.end_var.get(), self.search_var.get())
+        for row in rows:
+            self.voucher_tree.insert("", "end", iid=str(row["id"]), values=(
+                row["txn_date"], row["txn_type"], row["head_name"], row["counterparty"] or "",
+                format_currency(row["amount"]), row["voucher_no"] or "",
+            ))
+
+    def refresh_audit_rows(self) -> None:
+        if not hasattr(self, "audit_tree"):
+            return
+        self.audit_tree.delete(*self.audit_tree.get_children())
+        with connect_db() as conn:
+            rows = cashbook_audit_rows(conn, self.start_var.get(), self.end_var.get())
+        for row in rows:
+            self.audit_tree.insert("", "end", iid=str(row["id"]), values=(
+                row["id"], row["txn_date"], row["txn_type"], row["head_name"],
+                format_currency(row["amount"]), row["source_type"],
+                row["receipt_no"] or row["reference"] or "", row["voucher_no"] or "",
+                row["created_at"], row["created_by_name"] or "",
             ))
 
     def refresh_heads(self) -> None:
@@ -429,10 +519,12 @@ class CashbookWindow(WorkspacePage):
         except Exception as exc:
             messagebox.showerror("Print Cashbook", str(exc), parent=self)
             return
-        messagebox.showinfo("Print Cashbook", f"Cashbook saved to:\n{path}", parent=self)
+        self._open_pdf(path)
+        messagebox.showinfo("Print Cashbook", f"Cashbook saved and opened:\n{path}", parent=self)
 
     def print_selected_voucher(self) -> None:
-        selected = self.transaction_tree.selection()
+        active_tree = self.voucher_tree if hasattr(self, "voucher_tree") and self.notebook.select() == str(self.voucher_tree.master) else self.transaction_tree
+        selected = active_tree.selection()
         if not selected:
             messagebox.showwarning("Voucher", "Select a transaction first.", parent=self)
             return
@@ -442,4 +534,22 @@ class CashbookWindow(WorkspacePage):
         except Exception as exc:
             messagebox.showerror("Voucher", str(exc), parent=self)
             return
-        messagebox.showinfo("Voucher", f"Voucher saved to:\n{path}", parent=self)
+        self._open_pdf(path)
+        messagebox.showinfo("Voucher", f"Voucher saved and opened:\n{path}", parent=self)
+
+    def print_audit_report(self) -> None:
+        try:
+            with connect_db() as conn:
+                path = print_cashbook_audit_report(conn, self.start_var.get(), self.end_var.get())
+        except Exception as exc:
+            messagebox.showerror("Cashbook Audit", str(exc), parent=self)
+            return
+        self._open_pdf(path)
+        messagebox.showinfo("Cashbook Audit", f"Audit report saved and opened:\n{path}", parent=self)
+
+    def _open_pdf(self, path: str) -> None:
+        if hasattr(os, "startfile"):
+            os.startfile(path)
+        elif os.name == "posix":
+            opener = "open" if os.uname().sysname == "Darwin" else "xdg-open"
+            subprocess.Popen([opener, path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

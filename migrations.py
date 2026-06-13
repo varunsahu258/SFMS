@@ -528,6 +528,23 @@ def migration_v017_cashbook_and_student_details(conn: sqlite3.Connection) -> Non
     install_cashbook_schema(conn)
 
 
+def migration_v018_timetable_class_controls(conn: sqlite3.Connection) -> None:
+    """Add class/teacher controls required by timetable generation."""
+    class_columns = {row[1] for row in conn.execute("PRAGMA table_info(classes)")}
+    if "is_in_timetable" not in class_columns:
+        conn.execute("ALTER TABLE classes ADD COLUMN is_in_timetable INTEGER NOT NULL DEFAULT 1")
+    if "class_teacher_id" not in class_columns:
+        conn.execute("ALTER TABLE classes ADD COLUMN class_teacher_id INTEGER REFERENCES tt_teachers(id)")
+    teacher_columns = {row[1] for row in conn.execute("PRAGMA table_info(tt_teachers)")}
+    if "min_free_periods_day" not in teacher_columns:
+        conn.execute("ALTER TABLE tt_teachers ADD COLUMN min_free_periods_day INTEGER NOT NULL DEFAULT 1")
+    config_columns = {row[1] for row in conn.execute("PRAGMA table_info(tt_schedule_config)")}
+    if "assembly_after_period" not in config_columns:
+        conn.execute("ALTER TABLE tt_schedule_config ADD COLUMN assembly_after_period INTEGER")
+    if "assembly_duration_min" not in config_columns:
+        conn.execute("ALTER TABLE tt_schedule_config ADD COLUMN assembly_duration_min INTEGER NOT NULL DEFAULT 0")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     ("v001_base_settings", migration_v001_base_settings),
     ("v002_setup_defaults", migration_v002_setup_defaults),
@@ -546,6 +563,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     ("v015_installment_schedules", migration_v015_installment_schedules),
     ("v016_opening_balances", migration_v016_opening_balances),
     ("v017_cashbook_and_student_details", migration_v017_cashbook_and_student_details),
+    ("v018_timetable_class_controls", migration_v018_timetable_class_controls),
 )
 
 
