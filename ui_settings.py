@@ -7,7 +7,7 @@ import sqlite3
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
 
 from openpyxl import Workbook
 from openpyxl.cell import WriteOnlyCell
@@ -20,7 +20,7 @@ import backup
 from audit import log_operational_event
 from config import DB_PATH, REPORTS_DIR
 from security_utils import mask_aadhaar, sanitize_excel_cell
-from ui_theme import apply_theme
+from ui_theme import PALETTES, apply_theme
 
 SCHEDULE_HOURS = (2, 4, 6, 12, 24)
 
@@ -112,7 +112,7 @@ def export_full_database_to_excel(exported_by=None, export_password: str | None 
 class SettingsWindow(WorkspacePage):
     """Edit school, appearance, security, backup, and data settings."""
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("manage_settings")
     def __init__(self, master=None, *, embedded: bool = False):
         super().__init__(master, embedded=embedded)
         self.title("SFMS Settings")
@@ -125,6 +125,13 @@ class SettingsWindow(WorkspacePage):
         self.academic_year = tk.StringVar()
         self.theme = tk.StringVar(value="light")
         self.language = tk.StringVar(value="en")
+        self.font_family = tk.StringVar(value="Segoe UI")
+        self.font_size = tk.IntVar(value=10)
+        self.font_style = tk.StringVar(value="normal")
+        self.custom_bg = tk.StringVar(value="#f5f3fa")
+        self.custom_fg = tk.StringVar(value="#201a2b")
+        self.custom_card = tk.StringVar(value="#ffffff")
+        self.custom_accent = tk.StringVar(value="#5b3fc0")
         self.timeout = tk.IntVar(value=15)
         self.backup_interval = tk.StringVar(value="6")
         self.encryption = tk.BooleanVar(value=False)
@@ -145,6 +152,13 @@ class SettingsWindow(WorkspacePage):
         self.logo_path.set(values.get("logo_path", ""))
         self.theme.set(values.get("ui_theme", "light"))
         self.language.set(values.get("ui_language", "en"))
+        self.font_family.set(values.get("ui_font_family", "Segoe UI") or "Segoe UI")
+        self.font_size.set(int(values.get("ui_font_size", "10") or 10))
+        self.font_style.set(values.get("ui_font_style", "normal") or "normal")
+        self.custom_bg.set(values.get("ui_custom_bg", "#f5f3fa") or "#f5f3fa")
+        self.custom_fg.set(values.get("ui_custom_fg", "#201a2b") or "#201a2b")
+        self.custom_card.set(values.get("ui_custom_card", "#ffffff") or "#ffffff")
+        self.custom_accent.set(values.get("ui_custom_accent", "#5b3fc0") or "#5b3fc0")
         self.timeout.set(int(values.get("session_timeout_minutes", "15") or 15))
         self.backup_interval.set(values.get("backup_interval_hours", "6"))
         self.encryption.set(values.get("backup_encryption_enabled", "0") == "1")
@@ -185,13 +199,36 @@ class SettingsWindow(WorkspacePage):
         ttk.Combobox(frame, textvariable=self.academic_year, values=self.years, state="readonly").grid(row=5, column=1, sticky="w", padx=8)
 
     def _appearance(self, frame) -> None:
-        ttk.Label(frame, text="Theme", font=("Segoe UI", 11, "bold")).pack(anchor="w")
-        ttk.Radiobutton(frame, text="Light", variable=self.theme, value="light", command=self._apply_appearance).pack(anchor="w", pady=5)
-        ttk.Radiobutton(frame, text="Dark", variable=self.theme, value="dark", command=self._apply_appearance).pack(anchor="w", pady=5)
-        ttk.Separator(frame).pack(fill="x", pady=14)
-        ttk.Label(frame, text="Language", font=("Segoe UI", 11, "bold")).pack(anchor="w")
-        ttk.Radiobutton(frame, text="English", variable=self.language, value="en").pack(anchor="w", pady=5)
-        ttk.Radiobutton(frame, text="हिन्दी", variable=self.language, value="hi").pack(anchor="w", pady=5)
+        ttk.Label(frame, text="Theme preset", font=("Segoe UI", 11, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 6))
+        theme_values = [name.title() for name in (*PALETTES.keys(), "custom")]
+        ttk.Combobox(frame, textvariable=self.theme, values=[value.lower() for value in theme_values], state="readonly", width=18).grid(row=0, column=1, sticky="w", padx=8, pady=(0, 6))
+        ttk.Button(frame, text="Preview Theme", command=self._apply_appearance).grid(row=0, column=2, sticky="w")
+
+        font_frame = ttk.LabelFrame(frame, text="Text and font", padding=12)
+        font_frame.grid(row=1, column=0, columnspan=3, sticky="ew", pady=10)
+        self._entry(font_frame, "Font family", self.font_family, 0)
+        ttk.Label(font_frame, text="Text size").grid(row=1, column=0, sticky="w", pady=6)
+        tk.Scale(font_frame, from_=8, to=18, orient="horizontal", variable=self.font_size, length=260, command=lambda _v: self._apply_appearance()).grid(row=1, column=1, sticky="w", padx=8)
+        ttk.Label(font_frame, text="Font style").grid(row=2, column=0, sticky="w", pady=6)
+        ttk.Combobox(font_frame, textvariable=self.font_style, values=("normal", "bold", "italic", "bold italic"), state="readonly", width=16).grid(row=2, column=1, sticky="w", padx=8)
+
+        color_frame = ttk.LabelFrame(frame, text="Custom theme colors", padding=12)
+        color_frame.grid(row=2, column=0, columnspan=3, sticky="ew", pady=10)
+        for row, (label, variable) in enumerate((("Background", self.custom_bg), ("Text", self.custom_fg), ("Cards / fields", self.custom_card), ("Accent", self.custom_accent))):
+            ttk.Label(color_frame, text=label).grid(row=row, column=0, sticky="w", pady=5)
+            ttk.Entry(color_frame, textvariable=variable, width=14).grid(row=row, column=1, sticky="w", padx=8)
+            ttk.Button(color_frame, text="Choose", command=lambda var=variable: self._choose_color(var)).grid(row=row, column=2, sticky="w")
+        ttk.Label(frame, text="Language", font=("Segoe UI", 11, "bold")).grid(row=3, column=0, sticky="w", pady=(10, 4))
+        ttk.Radiobutton(frame, text="English", variable=self.language, value="en", command=self._apply_appearance).grid(row=4, column=0, sticky="w")
+        ttk.Radiobutton(frame, text="हिन्दी", variable=self.language, value="hi", command=self._apply_appearance).grid(row=4, column=1, sticky="w")
+        frame.columnconfigure(1, weight=1)
+
+    def _choose_color(self, variable: tk.StringVar) -> None:
+        chosen = colorchooser.askcolor(color=variable.get(), parent=self)[1]
+        if chosen:
+            variable.set(chosen)
+            self.theme.set("custom")
+            self._apply_appearance()
 
     def _security(self, frame) -> None:
         ttk.Label(frame, text="Session timeout (5–60 minutes)").pack(anchor="w")
@@ -229,6 +266,15 @@ class SettingsWindow(WorkspacePage):
         self.logo_preview.configure(image=self.logo_image, text="")
 
     def _apply_appearance(self) -> None:
+        with _connect() as conn:
+            for key, value in {
+                "ui_theme": self.theme.get(), "ui_language": self.language.get(),
+                "ui_font_family": self.font_family.get().strip() or "Segoe UI",
+                "ui_font_size": str(self.font_size.get()), "ui_font_style": self.font_style.get(),
+                "ui_custom_bg": self.custom_bg.get(), "ui_custom_fg": self.custom_fg.get(),
+                "ui_custom_card": self.custom_card.get(), "ui_custom_accent": self.custom_accent.get(),
+            }.items():
+                _upsert(conn, key, value)
         apply_theme(self, self.theme.get(), self.language.get())
 
     def reset_fingerprint(self) -> None:
@@ -300,6 +346,9 @@ class SettingsWindow(WorkspacePage):
             "school_name": self.school_name.get().strip(), "school_address": self.school_address.get().strip(),
             "receipt_issuer_name": self.receipt_issuer_name.get().strip() or "Sonali Sahu",
             "logo_path": self.logo_path.get().strip(), "ui_theme": self.theme.get(), "ui_language": self.language.get(),
+            "ui_font_family": self.font_family.get().strip() or "Segoe UI", "ui_font_size": str(self.font_size.get()),
+            "ui_font_style": self.font_style.get(), "ui_custom_bg": self.custom_bg.get(), "ui_custom_fg": self.custom_fg.get(),
+            "ui_custom_card": self.custom_card.get(), "ui_custom_accent": self.custom_accent.get(),
             "session_timeout_minutes": str(self.timeout.get()), "backup_interval_hours": self.backup_interval.get(),
             "backup_encryption_enabled": "1",
         }

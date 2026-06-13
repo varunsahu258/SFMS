@@ -434,15 +434,23 @@ class DashboardWindow(tk.Toplevel):
         administration = tk.LabelFrame(content, text="System & Administration", bg=palette["page"],
                                        fg=palette["text"], font=("Segoe UI", 10, "bold"), padx=10, pady=10)
         administration.pack(fill="x", pady=(0, 18))
-        actions = [("Backup & Restore", self._open_backup_window), ("Change Password", self._on_change_password_click),
-                   ("Help", self._on_help_click), ("About", self._on_about_click)]
+        actions = [("About", self._on_about_click)]
+        if auth.has_permission("manage_backup"):
+            actions.append(("Backup & Restore", self._open_backup_window))
+        if auth.has_permission("change_own_password"):
+            actions.append(("Change Password", self._on_change_password_click))
+        if auth.has_permission("view_help"):
+            actions.append(("Help", self._on_help_click))
         if auth.has_permission("manage_academic_years"):
             actions.append(("Academic Years", self._on_academic_years_click))
         if auth.has_permission("view_audit_log"):
             actions.append(("Audit Log", self._on_audit_log_click))
-        if auth.CURRENT_SESSION is not None and auth.CURRENT_SESSION.role == "ADMIN":
-            actions.extend((("Users", self._on_users_click), ("Accountant Permissions", self._on_permissions_click),
-                            ("Settings", self._on_settings_click)))
+        if auth.has_permission("manage_users"):
+            actions.append(("Users", self._on_users_click))
+        if auth.has_permission("manage_permissions"):
+            actions.append(("Role Permissions", self._on_permissions_click))
+        if auth.has_permission("manage_settings"):
+            actions.append(("Settings", self._on_settings_click))
         for text, command in actions:
             ttk.Button(administration, text=text, command=command).pack(side="left", padx=4, pady=2)
         self._load_notifications_async()
@@ -728,6 +736,7 @@ class DashboardWindow(tk.Toplevel):
 
         self._show_workspace_page(DuesWindow, "Student Dues", "dues", overdue_threshold=threshold)
 
+    @auth.require_permission("manage_backup")
     def _open_backup_window(self) -> None:
         """Open the manual backup window."""
         auth.touch_session()
@@ -956,6 +965,7 @@ class DashboardWindow(tk.Toplevel):
         self._show_workspace_page(FeeNoticeWindow, "Fee Notices", "notices")
 
 
+    @auth.require_permission("manage_users")
     def _on_users_click(self) -> None:
         """Open administrator user management."""
         auth.touch_session()
@@ -963,13 +973,15 @@ class DashboardWindow(tk.Toplevel):
 
         self._show_workspace_page(UserManagementWindow, "User Management", "users")
 
-    @auth.require_role("ADMIN")
+    @auth.require_permission("manage_permissions")
     def _on_permissions_click(self) -> None:
-        """Open per-accountant permission management."""
+        """Open configurable role/module permission management."""
+        auth.touch_session()
         from ui_permissions import AccountantPermissionsWindow
 
         self._show_workspace_page(AccountantPermissionsWindow, "Accountant Permissions", "permissions")
 
+    @auth.require_permission("manage_settings")
     def _on_settings_click(self) -> None:
         """Open administrator settings."""
         auth.touch_session()
@@ -977,6 +989,7 @@ class DashboardWindow(tk.Toplevel):
 
         self._show_workspace_page(SettingsWindow, "Settings", "settings")
 
+    @auth.require_permission("view_help")
     def _on_help_click(self) -> None:
         """Open bundled offline help."""
         auth.touch_session()
@@ -991,6 +1004,7 @@ class DashboardWindow(tk.Toplevel):
 
         AboutDialog(self)
 
+    @auth.require_permission("change_own_password")
     def _on_change_password_click(self) -> None:
         """Touch the session and open the change-password window."""
         auth.touch_session()

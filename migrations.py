@@ -552,6 +552,21 @@ def migration_v019_exam_result_management(conn: sqlite3.Connection) -> None:
     install_exam_schema(conn)
 
 
+def migration_v020_appearance_permissions(conn: sqlite3.Connection) -> None:
+    """Seed customizable appearance defaults used by the global theme engine."""
+    defaults = {
+        "ui_font_family": "Segoe UI",
+        "ui_font_size": "10",
+        "ui_font_style": "normal",
+        "ui_custom_bg": "#f5f3fa",
+        "ui_custom_fg": "#201a2b",
+        "ui_custom_card": "#ffffff",
+        "ui_custom_accent": "#5b3fc0",
+    }
+    for key, value in defaults.items():
+        _setting(conn, key, value)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     ("v001_base_settings", migration_v001_base_settings),
     ("v002_setup_defaults", migration_v002_setup_defaults),
@@ -572,6 +587,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     ("v017_cashbook_and_student_details", migration_v017_cashbook_and_student_details),
     ("v018_timetable_class_controls", migration_v018_timetable_class_controls),
     ("v019_exam_result_management", migration_v019_exam_result_management),
+    ("v020_appearance_permissions", migration_v020_appearance_permissions),
 )
 
 
